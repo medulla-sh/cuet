@@ -1,0 +1,31 @@
+[package]
+name = "cuet"
+version = "0.1.0"
+edition = "2024"
+description = "A CLI for managing infrastructure deployment using the cuet framework."
+license = "MIT"
+repository = "https://github.com/medulla-sh/cuet"
+homepage = "https://github.com/medulla-sh/cuet"
+readme = "README.md"
+keywords = ["cue", "terraform", "infrastructure", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "cuet"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5.53", features = [
+  "derive",
+  "env",
+  "unicode",
+  "wrap_help",
+] }
+miette = { version = "7.6.0", features = ["fancy", "serde"] }
+owo-colors = "4.2.3"
+shell-words = "1.1.1"
+which = "8.0.0"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

@@ -1,0 +1,16 @@
+*.png filter=lfs diff=lfs merge=lfs -text
+*.jpeg filter=lfs diff=lfs merge=lfs -text
+*.jpg filter=lfs diff=lfs merge=lfs -text
+*.gif filter=lfs diff=lfs merge=lfs -text
+*.webp filter=lfs diff=lfs merge=lfs -text
+*.ico filter=lfs diff=lfs merge=lfs -text
+
+# Bun configuration
+**/bun.lock -merge -diff
+**/bun.lock linguist-generated
+
+**/uv.lock -merge -diff
+**/uv.lock linguist-generated
+
+**/Cargo.lock -merge -diff
+**/Cargo.lock linguist-generated
