@@ -194,7 +194,7 @@ jobs:
       - name: Push tap update
         working-directory: tap
         run: |
-          if git diff --quiet -- Formula/cuet.rb; then
+          if [[ -z "$(git status --porcelain -- Formula/cuet.rb)" ]]; then
             echo "Formula is already up to date"
             exit 0
           fi
