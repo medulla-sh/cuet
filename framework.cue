@@ -71,7 +71,7 @@ _#DefaultProviderAlias: ""
 //         #Terraform: {
 //             requiredVersion: "~>1.0.0"
 //             backend: gcs: {
-//                 bucket: "medulla-\(#env)"
+//                 bucket: "example-\(#env)"
 //                 prefix: #module
 //             }
 //             providers: {
@@ -81,7 +81,7 @@ _#DefaultProviderAlias: ""
 //                         version: "~>7.14.1"
 //                     }
 //                     default: provider: {
-//                         project: "medulla-dev"
+//                         project: "example-dev"
 //                         region:  "us-west1"
 //                     }
 //                 }

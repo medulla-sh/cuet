@@ -19,8 +19,8 @@ I.#InfraModule
 
 infra: dev: {
     (google.#Bucket & {in: {
-        #import:  "medulla-dev/medulla-thoth-dev"
-        name:     "medulla-thoth-dev"
+        #import:  "example-dev/example-assets-dev"
+        name:     "example-assets-dev"
         location: "us-west1"
     }}).out
 }
@@ -30,8 +30,8 @@ This generates an import block equivalent to:
 
 ```hcl
 import {
-  to = google_storage_bucket.medulla-thoth-dev
-  id = "medulla-dev/medulla-thoth-dev"
+  to = google_storage_bucket.example-assets-dev
+  id = "example-dev/example-assets-dev"
 }
 ```
 

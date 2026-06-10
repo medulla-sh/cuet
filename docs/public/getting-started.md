@@ -26,7 +26,7 @@ I.#InfraModule
 infra: {
     dev: {
         (google.#Secret & {in: secretId: "neon-dev"}).out
-        (neon.#ApiKey & {in: name: "medulla-dev"}).out
+        (neon.#ApiKey & {in: name: "neon-dev"}).out
     }
 }
 ```
