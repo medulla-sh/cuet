@@ -1,5 +1,7 @@
 # cuet
 
+[![CLI Release](https://github.com/medulla-sh/cuet/actions/workflows/cli-release.yml/badge.svg)](https://github.com/medulla-sh/cuet/actions/workflows/cli-release.yml)
+
 `cuet` is a framework + CLI for modeling deployment configuration in CUE,
 keeping application deployment concerns close to each app while centralizing
 platform policy and standards.
@@ -12,6 +14,33 @@ At a high level:
 - Primitive building blocks under `cuet/primitives/` generate deployment input.
 - The `cuet` CLI evaluates a target module and writes
   `.cuet/<env>/main.tf.json`.
+
+## Install
+
+Install the CLI with Homebrew:
+
+```bash
+brew tap medulla-sh/tap
+brew install cuet
+```
+
+Install dependencies:
+
+```bash
+brew install cue-lang/tap/cue opentofu
+```
+
+<details>
+<summary>Using your own CUE or Terraform/OpenTofu binaries</summary>
+
+`cuet` expects `cue` and `tofu` to be available on `PATH`, but does not install
+or vendor them. Manage those tools with Homebrew, Nix, mise, asdf, manual
+downloads, or your team's existing toolchain.
+
+Use `--cue-path` or `--tf-path` to point at alternate binaries, including
+Terraform instead of OpenTofu.
+
+</details>
 
 ## Public docs
 
