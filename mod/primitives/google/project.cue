@@ -7,6 +7,7 @@ import (
 
 #GcpServices:
 	"artifactregistry.googleapis.com" |
+	"compute.googleapis.com" |
 	"iam.googleapis.com" |
 	"run.googleapis.com" |
 	"secretmanager.googleapis.com"
