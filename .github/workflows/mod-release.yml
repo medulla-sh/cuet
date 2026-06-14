@@ -30,5 +30,6 @@ jobs:
       - name: Publish module
         working-directory: mod
         run: |
+          VERSION="${GITHUB_REF_NAME#mod/}"
           cue login --token "${{ secrets.CUE_REGISTRY_TOKEN }}"
-          cue mod publish
+          cue mod publish "$VERSION"
