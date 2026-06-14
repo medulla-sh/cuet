@@ -32,4 +32,4 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#mod/}"
           cue login --token "${{ secrets.CUE_REGISTRY_TOKEN }}"
-          cue mod publish "$VERSION"
+          cue mod publish "v$VERSION"
