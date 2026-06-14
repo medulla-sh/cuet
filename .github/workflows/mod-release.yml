@@ -1,0 +1,36 @@
+name: Module Release
+
+on:
+  push:
+    tags:
+      - "mod/*"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  publish:
+    name: Publish CUE module
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install CUE
+        uses: cue-lang/setup-cue@v1
+        with:
+          version: v0.16.1
+
+      - name: Tidy module
+        working-directory: mod
+        run: cue mod tidy
+
+      - name: Publish module
+        working-directory: mod
+        run: |
+          cue login --token "${{ secrets.CUE_REGISTRY_TOKEN }}"
+          cue mod publish
