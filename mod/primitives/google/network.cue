@@ -22,13 +22,28 @@ import (
 		subnets: [#RFC1035Name]: {
 			region: #Region
 
-			privateIpGoogleAccess: bool
-			privateIpGoogleAccess: _ | *true
-
 			primaryRange: #RFC1035Name
 			primaryRange: or([for k, _ in cidrs {k}])
 
 			cidrs: [#RFC1035Name]: net.IPCIDR
+
+			egress: {
+				privateIpGoogleAccess: bool
+				privateIpGoogleAccess: _ | *true
+
+				nat: bool
+				nat: _ | *false
+			}
+		}
+	}
+
+	let subnetsByRegionsWithNat = {
+		for subnetName, subnet in in.subnets if subnet.egress.nat {
+			(subnet.region): {
+				routerName: "\(in.name)-\(subnet.region)"
+				natName:    "\(in.name)-\(subnet.region)"
+				subnets: (subnetName): subnet
+			}
 		}
 	}
 
@@ -37,6 +52,16 @@ import (
 		subnets: {
 			for name, _ in in.subnets {
 				(name): "google_compute_subnetwork.\(name)"
+			}
+		}
+		routers: {
+			for region, data in subnetsByRegionsWithNat {
+				(region): "google_compute_router.\(data.routerName)"
+			}
+		}
+		nats: {
+			for region, data in subnetsByRegionsWithNat {
+				(region): "google_compute_router_nat.\(data.natName)"
 			}
 		}
 	}
@@ -61,7 +86,7 @@ import (
 
 				region: subnet.region
 
-				private_ip_google_access: subnet.privateIpGoogleAccess
+				private_ip_google_access: subnet.egress.privateIpGoogleAccess
 
 				ip_cidr_range: subnet.cidrs[subnet.primaryRange]
 
@@ -69,6 +94,30 @@ import (
 					for name, cidr in subnet.cidrs if name != subnet.primaryRange {
 						range_name:    name
 						ip_cidr_range: cidr
+					},
+				]
+			}
+		}
+
+		for region, data in subnetsByRegionsWithNat {
+			resource: google_compute_router: (data.routerName): {
+				name:     data.routerName
+				network:  "${\(refs.network).id}"
+				"region": region
+			}
+
+			resource: google_compute_router_nat: (data.natName): {
+				name:     data.natName
+				"region": region
+				router:   "${\(refs.routers[region]).name}"
+
+				nat_ip_allocate_option: "AUTO_ONLY"
+
+				source_subnetwork_ip_ranges_to_nat: "LIST_OF_SUBNETWORKS"
+				subnetwork: [
+					for subnetName, _ in data.subnets {
+						name: "${\(refs.subnets[subnetName]).name}"
+						source_ip_ranges_to_nat: ["ALL_IP_RANGES"]
 					},
 				]
 			}
