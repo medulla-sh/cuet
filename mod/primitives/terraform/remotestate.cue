@@ -23,10 +23,11 @@ import (
 
 		data: terraform_remote_state: (_remoteStateName): {
 			backend: backendName
-			config:  backendConfig[backendName]
-
-			if backendName == "gcs" {
-				config: prefix: sourceModule
+			config: {
+				for k, v in backendConfig[backendName] if k != "prefix" {
+					(k): v
+				}
+				prefix: sourceModule
 			}
 		}
 	}
@@ -50,10 +51,11 @@ import (
 		let backendName = [for k, _ in backendConfig {k}][0]
 		data: terraform_remote_state: (_remoteStateName): {
 			backend: backendName
-			config:  backendConfig[backendName]
-
-			if backendName == "gcs" {
-				config: prefix: sourceModule
+			config: {
+				for k, v in backendConfig[backendName] if k != "prefix" {
+					(k): v
+				}
+				prefix: sourceModule
 			}
 		}
 	}
