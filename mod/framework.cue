@@ -62,7 +62,7 @@ _#DefaultProviderAlias: ""
 //     // infra/config.cue
 //     package infra
 //
-//     #BaseConfig: cuet.#InfraModule & {
+//     #InfraModule: cuet.#InfraModule & {
 //         #Environments: {
 //             dev: _
 //             staging: _
