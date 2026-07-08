@@ -20,6 +20,49 @@ import (
 
 #GkeHubLocation: "global" | #Region
 
+#GkeKubernetesServiceAccountPrincipal: {
+	in: {
+		namespace:      string
+		serviceAccount: string
+
+		name?: string
+		project: {
+			name?: string
+			id?:   string
+		}
+		project: _ | *{}
+	}
+
+	let localName = "\(in.namespace)-\(in.serviceAccount)-principal"
+
+	ref: out.#ref
+
+	member: "${local[\"\(localName)\"]}"
+
+	out: this=T.#TerraformInput & {
+		let projectDataName = [
+			if in.name != _|_ {in.name},
+			if in.project.name != _|_ {in.project.name},
+			this.#envName,
+		][0]
+
+		let projectId = [
+			if in.project.id != _|_ {in.project.id},
+			"${data.google_project[\"\(projectDataName)\"].project_id}",
+		][0]
+
+		#ref: "data.google_project[\"\(projectDataName)\"]"
+
+		data: google_project: (projectDataName): {
+			if in.project.id != _|_ {
+				project_id: in.project.id
+			}
+		}
+
+		locals: (localName): "principal://iam.googleapis.com/projects/${\(#ref).number}/locations/global/workloadIdentityPools/\(projectId).svc.id.goog/subject/ns/\(in.namespace)/sa/\(in.serviceAccount)"
+	}
+}
+
 #GkeCluster: {
 	in: {
 		#import?: string
@@ -27,7 +70,11 @@ import (
 		name:     string
 		location: #Region
 
-		project?: string
+		project: {
+			name?: string
+			id?:   string
+		}
+		project: _ | *{}
 
 		network:    string
 		subnetwork: string
@@ -52,20 +99,23 @@ import (
 
 	ref: "google_container_cluster.\(in.name)"
 
-	out: T.#TerraformInput & {
-		let projectDataName = in.name
+	out: this=T.#TerraformInput & {
+		let projectDataName = [
+			if in.project.name != _|_ {in.project.name},
+			this.#envName,
+		][0]
 
 		if in.workloadPool == _|_ {
 			data: google_project: (projectDataName): {
-				if in.project != _|_ {
-					project_id: in.project
+				if in.project.id != _|_ {
+					project_id: in.project.id
 				}
 			}
 		}
 
 		let workloadPool = [
 			if in.workloadPool != _|_ {in.workloadPool},
-			if in.workloadPool == _|_ {"${data.google_project.\(projectDataName).project_id}.svc.id.goog"},
+			if in.workloadPool == _|_ {"${data.google_project[\"\(projectDataName)\"].project_id}.svc.id.goog"},
 		][0]
 
 		resource: google_container_cluster: (in.name): {
@@ -76,8 +126,8 @@ import (
 			name:     in.name
 			location: in.location
 
-			if in.project != _|_ {
-				project: in.project
+			if in.project.id != _|_ {
+				project: in.project.id
 			}
 
 			enable_autopilot:    in.enableAutopilot
