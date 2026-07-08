@@ -33,11 +33,7 @@ import (
 		project: _ | *{}
 	}
 
-	let localName = "\(in.namespace)-\(in.serviceAccount)-principal"
-
-	ref: out.#ref
-
-	member: "${local[\"\(localName)\"]}"
+	val: out.#val
 
 	out: this=T.#TerraformInput & {
 		let projectDataName = [
@@ -48,18 +44,16 @@ import (
 
 		let projectId = [
 			if in.project.id != _|_ {in.project.id},
-			"${data.google_project[\"\(projectDataName)\"].project_id}",
+			"${data.google_project.\(projectDataName).project_id}",
 		][0]
 
-		#ref: "data.google_project[\"\(projectDataName)\"]"
+		#val: "principal://iam.googleapis.com/projects/${data.google_project.\(projectDataName).number}/locations/global/workloadIdentityPools/\(projectId).svc.id.goog/subject/ns/\(in.namespace)/sa/\(in.serviceAccount)"
 
 		data: google_project: (projectDataName): {
 			if in.project.id != _|_ {
 				project_id: in.project.id
 			}
 		}
-
-		locals: (localName): "principal://iam.googleapis.com/projects/${\(#ref).number}/locations/global/workloadIdentityPools/\(projectId).svc.id.goog/subject/ns/\(in.namespace)/sa/\(in.serviceAccount)"
 	}
 }
 
@@ -115,7 +109,7 @@ import (
 
 		let workloadPool = [
 			if in.workloadPool != _|_ {in.workloadPool},
-			if in.workloadPool == _|_ {"${data.google_project[\"\(projectDataName)\"].project_id}.svc.id.goog"},
+			if in.workloadPool == _|_ {"${data.google_project.\(projectDataName).project_id}.svc.id.goog"},
 		][0]
 
 		resource: google_container_cluster: (in.name): {
