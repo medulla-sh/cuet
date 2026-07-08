@@ -19,6 +19,7 @@ These docs are for teams that want:
 - [Why Cuet?](why-cuet.md)
 - [Getting Started](getting-started.md)
 - [Module model](module-model.md)
+- [Output policies](output-policies.md)
 - [Module variables](module-variables.md)
 - [Adding your First Provider](adding-your-first-provider.md)
 - [Adding a dependent provider](adding-a-dependent-provider.md)

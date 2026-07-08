@@ -10,8 +10,10 @@ This page describes the main objects in `cuet` and how they relate.
   `global`) declared by the base infra config.
 - **Input graph** (`infra.in`): per-environment deployment input assembled from
   primitives.
-- **Output graph** (`infra.out` / `out`): generated backend-specific deployment
-  object per environment.
+- **Generated graph** (`infra.generated`): backend-specific deployment object
+  before output policies are applied.
+- **Output graph** (`infra.out` / `out`): final backend-specific deployment
+  object per environment after output policies are applied.
 - **Platform policy**: fleet-wide constraints applied centrally (for example in
   `infra/policy.cue`).
 
@@ -25,7 +27,8 @@ At a high level:
 
 1. Base config defines environments and backend defaults.
 1. Module writes environment input under `infra.in`.
-1. Framework transforms `infra.in[env]` into `infra.out[env]`.
+1. Framework transforms `infra.in[env]` into `infra.generated[env]`.
+1. Framework applies `#OutputPolicy` to produce `infra.out[env]`.
 1. CLI exports that output to `.cuet/<env>/main.tf.json`.
 
 ## Shape of a module
@@ -50,6 +53,8 @@ infra: in: {
 ## Notes
 
 - `out` is an alias for `infra.out`.
+- `infra.generated` is useful for debugging raw generated output before output
+  policies run.
 - `infra.#metadata` is CLI-injected framework context and should generally be
   treated as internal plumbing.
 - Terraform/OpenTofu is the current backend in this repository.

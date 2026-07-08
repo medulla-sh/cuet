@@ -124,6 +124,14 @@ _#DefaultProviderAlias: ""
 	#Environments: [string]: _
 	#Env: or([for k, _ in #Environments {k}])
 
+	#OutputPolicy: {
+		in:  #TerraformOutput
+		out: #TerraformOutput
+	} | *{
+		in:  #TerraformOutput
+		out: in
+	}
+
 	// Configuration for terraform. In theory, cuet will support multiple forms
 	// of infra in a single file. We want to allow configuration globally to
 	// avoid having to repeat it for each environment.
@@ -155,7 +163,7 @@ _#DefaultProviderAlias: ""
 			}
 		})
 
-		out: {
+		generated: {
 			let metadata = infraThis.#metadata
 
 			for e, _ in #Environments {
@@ -170,6 +178,12 @@ _#DefaultProviderAlias: ""
 						#backendConfigs: backendConfigs
 					}
 				}).out
+			}
+		}
+
+		out: {
+			for e, _ in #Environments {
+				(e): (#OutputPolicy & {in: infraThis.generated[e]}).out
 			}
 		}
 	}
