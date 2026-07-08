@@ -12,6 +12,7 @@ import (
 		name: _ | *secretId
 
 		secretId: string
+		value?:   string
 		accessors: {[string]: string}
 		annotations: {[string]: string}
 	}
@@ -42,6 +43,13 @@ import (
 				role:      "roles/secretmanager.secretAccessor"
 				"member":  accessor
 				...
+			}
+		}
+
+		if in.value != _|_ {
+			resource: google_secret_manager_secret_version: (secretName): {
+				secret:      "${\(secretRef).id}"
+				secret_data: in.value
 			}
 		}
 	}
