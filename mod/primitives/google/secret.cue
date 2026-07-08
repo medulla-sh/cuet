@@ -12,10 +12,14 @@ import (
 		name: _ | *secretId
 
 		secretId: string
+		accessors: {[string]: string}
 		annotations: {[string]: string}
 	}
 	ref: "google_secret_manager_secret.\(in.name)"
 	out: T.#TerraformInput & {
+		let secretName = in.name
+		let secretRef = ref
+
 		resource: google_secret_manager_secret: (in.name): {
 			if in.#import != _|_ {
 				#import: in.#import
@@ -29,6 +33,42 @@ import (
 
 			// TODO(mez): make this configurable
 			replication: auto: {}
+			...
+		}
+
+		for name, accessor in (*in.accessors | {}) {
+			resource: google_secret_manager_secret_iam_member: ("\(secretName)-\(name)-accessor"): {
+				secret_id: "${\(secretRef).id}"
+				role:      "roles/secretmanager.secretAccessor"
+				"member":  accessor
+				...
+			}
+		}
+	}
+}
+
+#SecretIamMember: {
+	in: {
+		#import?: string
+
+		name:     string
+		secretId: string
+		role:     string
+		role:     _ | *"roles/secretmanager.secretAccessor"
+		member:   string
+	}
+
+	ref: "google_secret_manager_secret_iam_member.\(in.name)"
+
+	out: T.#TerraformInput & {
+		resource: google_secret_manager_secret_iam_member: (in.name): {
+			if in.#import != _|_ {
+				#import: in.#import
+			}
+
+			secret_id: in.secretId
+			role:      in.role
+			member:    in.member
 			...
 		}
 	}
