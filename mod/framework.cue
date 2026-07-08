@@ -14,7 +14,7 @@ _#DefaultProviderAlias: ""
 #ProviderInstance: {
 	// Additional Terraform input required to bootstrap this provider instance.
 	bootstrap: {...}
-	bootstrap: _ | *{}
+	bootstrap: _ | *{...}
 	provider: {...}
 }
 
@@ -253,7 +253,8 @@ _#GenerateProviders: {
 			]
 
 			for block in providerBlocks {
-				block.bootstrap
+				// TODO (LUM-16): Remove this default fallback.
+				*block.bootstrap | {...}
 			}
 			"provider": (providerName): [for block in providerBlocks {block.provider}]
 		}
