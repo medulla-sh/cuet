@@ -81,6 +81,9 @@ import (
 		meshCertificates: bool
 		meshCertificates: _ | *false
 
+		secretManager: bool
+		secretManager: _ | *false
+
 		deletionProtection: bool
 		deletionProtection: _ | *true
 
@@ -143,6 +146,12 @@ import (
 			if in.meshCertificates {
 				mesh_certificates: {
 					enable_certificates: true
+				}
+			}
+
+			if in.secretManager {
+				secret_manager_config: {
+					enabled: true
 				}
 			}
 
