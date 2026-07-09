@@ -57,7 +57,6 @@ import (
 		#import?: string
 
 		name: string
-		name: _ | *"default"
 
 		policy: #PolicyFile
 
