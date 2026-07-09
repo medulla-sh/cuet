@@ -253,8 +253,16 @@ _#GenerateProviders: {
 			]
 
 			for block in providerBlocks {
-				// TODO (LUM-16): Remove this default fallback.
-				*block.bootstrap | {...}
+				// The bootstrap block should always exist, so this is weird.
+				// TODO (LUM-16): Remove this if when we figure out why this exists.
+				if block.bootstrap != _|_ {
+					block.bootstrap & {
+						#module:         in.#module
+						#backendConfigs: in.#backendConfigs
+						#envName:        in.#envName
+						#env:            in.#env
+					}
+				}
 			}
 			"provider": (providerName): [for block in providerBlocks {block.provider}]
 		}
