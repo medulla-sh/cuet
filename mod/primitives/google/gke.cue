@@ -105,6 +105,14 @@ import (
 		secretManager: bool
 		secretManager: _ | *false
 
+		secretSync: {
+			enabled: bool
+			enabled: _ | *false
+
+			rotationInterval?: =~"^([6-9][0-9]|[1-9][0-9]{2,})s$"
+		}
+		secretSync: _ | *{}
+
 		deletionProtection: bool
 		deletionProtection: _ | *true
 
@@ -202,6 +210,18 @@ import (
 			if in.secretManager {
 				secret_manager_config: {
 					enabled: true
+				}
+			}
+
+			if in.secretSync.enabled {
+				secret_sync_config: {
+					enabled: true
+					if in.secretSync.rotationInterval != _|_ {
+						rotation_config: {
+							enabled:           true
+							rotation_interval: in.secretSync.rotationInterval
+						}
+					}
 				}
 			}
 
