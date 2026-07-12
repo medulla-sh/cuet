@@ -14,6 +14,7 @@ import (
 	"meshca.googleapis.com" |
 	"meshconfig.googleapis.com" |
 	"networksecurity.googleapis.com" |
+	"networkservices.googleapis.com" |
 	"run.googleapis.com" |
 	"secretmanager.googleapis.com"
 
