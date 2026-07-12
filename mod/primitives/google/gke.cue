@@ -162,6 +162,12 @@ import (
 						master_ipv4_cidr_block: in.masterIpv4CidrBlock
 					}
 				}
+
+				if !in.enablePublicEndpoint {
+					master_authorized_networks_config: {
+						gcp_public_cidrs_access_enabled: false
+					}
+				}
 			}
 
 			workload_identity_config: {
