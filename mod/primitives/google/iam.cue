@@ -1,6 +1,8 @@
 package google
 
 import (
+	"regexp"
+
 	T "github.com/medulla-sh/cuet"
 )
 
@@ -9,23 +11,30 @@ import (
 		#import?: string
 
 		name: string
-
-		project?: string
-		role:     string
-		member:   string
+		name: _ | *regexp.ReplaceAll("[^[:alnum:]_-]", "\(in.role)-\(in.member)", "-")
+		project: {
+			name: string
+			id?:  string
+		}
+		role:   string
+		member: string
 	}
 
 	ref: "google_project_iam_member.\(in.name)"
 
 	out: T.#TerraformInput & {
+		data: google_project: (in.project.name): {
+			if in.project.id != _|_ {
+				project_id: in.project.id
+			}
+		}
+
 		resource: google_project_iam_member: (in.name): {
 			if in.#import != _|_ {
 				#import: in.#import
 			}
 
-			if in.project != _|_ {
-				project: in.project
-			}
+			project: "${data.google_project.\(in.project.name).project_id}"
 
 			role:   in.role
 			member: in.member

@@ -22,6 +22,25 @@ import (
 
 #GkeHubLocation: "global" | #Region
 
+#DefaultComputeServiceAccount: {
+	in: {
+		project: {
+			name: string
+			id?:  string
+		}
+	}
+
+	val: "serviceAccount:${data.google_project.\(in.project.name).number}-compute@developer.gserviceaccount.com"
+
+	out: T.#TerraformInput & {
+		data: google_project: (in.project.name): {
+			if in.project.id != _|_ {
+				project_id: in.project.id
+			}
+		}
+	}
+}
+
 #GkeKubernetesServiceAccountPrincipal: {
 	in: {
 		namespace:      string

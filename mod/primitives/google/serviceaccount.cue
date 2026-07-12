@@ -1,9 +1,6 @@
 package google
 
-import (
-	"regexp"
-	T "github.com/medulla-sh/cuet"
-)
+import T "github.com/medulla-sh/cuet"
 
 #ServiceAccount: {
 	in: {
@@ -18,13 +15,22 @@ import (
 		displayName: _ | *accountId
 
 		description?: string
-		project?:     string
+		project: {
+			name: string
+			id?:  string
+		}
 
 		roles: [...string]
 	}
 
 	ref: "google_service_account.\(in.name)"
 	out: T.#TerraformInput & {
+		data: google_project: (in.project.name): {
+			if in.project.id != _|_ {
+				project_id: in.project.id
+			}
+		}
+
 		resource: google_service_account: (in.name): {
 			if in.#import != _|_ {
 				#import: in.#import
@@ -38,21 +44,15 @@ import (
 				description: in.description
 			}
 
-			if in.project != _|_ {
-				project: in.project
-			}
+			project: "${data.google_project.\(in.project.name).project_id}"
 		}
 
 		for role in in.roles {
-			let roleName = regexp.ReplaceAll("[:/.]", role, "-")
 			let iamMember = #IamMember & {"in": {
-				name:   "\(in.name)-\(roleName)"
 				"role": role
 				member: "serviceAccount:${\(ref).email}"
 
-				if in.project != _|_ {
-					project: in.project
-				}
+				project: in.project
 			}}
 			iamMember.out
 		}
