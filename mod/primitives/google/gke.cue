@@ -105,6 +105,9 @@ import (
 		secretManager: bool
 		secretManager: _ | *false
 
+		managedOpenTelemetry: bool
+		managedOpenTelemetry: _ | *false
+
 		secretSync: {
 			enabled: bool
 			enabled: _ | *false
@@ -210,6 +213,12 @@ import (
 			if in.secretManager {
 				secret_manager_config: {
 					enabled: true
+				}
+			}
+
+			if in.managedOpenTelemetry {
+				managed_opentelemetry_config: {
+					scope: "COLLECTION_AND_INSTRUMENTATION_COMPONENTS"
 				}
 			}
 

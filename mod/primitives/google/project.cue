@@ -7,16 +7,20 @@ import (
 
 #GcpServices:
 	"artifactregistry.googleapis.com" |
+	"cloudtrace.googleapis.com" |
 	"container.googleapis.com" |
 	"compute.googleapis.com" |
 	"gkehub.googleapis.com" |
 	"iam.googleapis.com" |
 	"meshca.googleapis.com" |
 	"meshconfig.googleapis.com" |
+	"logging.googleapis.com" |
+	"monitoring.googleapis.com" |
 	"networksecurity.googleapis.com" |
 	"networkservices.googleapis.com" |
 	"run.googleapis.com" |
-	"secretmanager.googleapis.com"
+	"secretmanager.googleapis.com" |
+	"telemetry.googleapis.com"
 
 #Project: {
 	in: {
