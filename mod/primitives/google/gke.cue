@@ -1,6 +1,8 @@
 package google
 
 import (
+	"net"
+
 	T "github.com/medulla-sh/cuet"
 )
 
@@ -87,6 +89,17 @@ import (
 		deletionProtection: bool
 		deletionProtection: _ | *true
 
+		assignPublicNodeIps: bool
+		assignPublicNodeIps: _ | *true
+
+		if !assignPublicNodeIps {
+			enablePublicEndpoint: bool
+			enablePublicEndpoint: _ | *true
+
+			// GKE requires a non-overlapping /28 when explicitly assigning this range.
+			masterIpv4CidrBlock?: net.IPCIDR & =~"^[0-9.]+/28$"
+		}
+
 		releaseChannel: #GkeReleaseChannel
 		releaseChannel: _ | *"REGULAR"
 
@@ -137,6 +150,18 @@ import (
 			ip_allocation_policy: {
 				cluster_secondary_range_name:  in.podRangeName
 				services_secondary_range_name: in.serviceRangeName
+			}
+
+			if !in.assignPublicNodeIps {
+				private_cluster_config: {
+					enable_private_nodes: true
+					if !in.enablePublicEndpoint {
+						enable_private_endpoint: true
+					}
+					if in.masterIpv4CidrBlock != _|_ {
+						master_ipv4_cidr_block: in.masterIpv4CidrBlock
+					}
+				}
 			}
 
 			workload_identity_config: {
