@@ -13,6 +13,7 @@ import (
 	"iam.googleapis.com" |
 	"meshca.googleapis.com" |
 	"meshconfig.googleapis.com" |
+	"networksecurity.googleapis.com" |
 	"run.googleapis.com" |
 	"secretmanager.googleapis.com"
 
