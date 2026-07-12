@@ -46,7 +46,7 @@ _#DefaultProviderAlias: ""
 #TerraformConfig: {
 	#metadata: #Metadata
 	#envName:  string
-	#env:      string
+	#env:      _
 
 	requiredVersion: string
 	backend: [string]: {...}
