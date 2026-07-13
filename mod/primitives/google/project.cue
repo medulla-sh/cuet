@@ -20,7 +20,8 @@ import (
 	"networkservices.googleapis.com" |
 	"run.googleapis.com" |
 	"secretmanager.googleapis.com" |
-	"telemetry.googleapis.com"
+	"telemetry.googleapis.com" |
+	"trafficdirector.googleapis.com"
 
 #Project: {
 	in: {
