@@ -87,3 +87,25 @@ import (
 		}
 	}
 }
+
+#TailnetSettings: {
+	in: {
+		#import?: string
+
+		name: string
+
+		httpsEnabled: bool
+	}
+
+	ref: "tailscale_tailnet_settings.\(in.name)"
+
+	out: T.#TerraformInput & {
+		resource: tailscale_tailnet_settings: (in.name): {
+			if in.#import != _|_ {
+				#import: in.#import
+			}
+
+			https_enabled: in.httpsEnabled
+		}
+	}
+}
