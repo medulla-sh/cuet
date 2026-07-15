@@ -1,17 +1,13 @@
 name: Module Release
-
 on:
   push:
     tags:
       - "mod/*"
-
 permissions:
   contents: read
-
 defaults:
   run:
     shell: bash
-
 jobs:
   publish:
     name: Publish CUE module
@@ -19,14 +15,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Install CUE
         uses: cue-lang/setup-cue@v1.0.1
-
       - name: Tidy module
         working-directory: mod
         run: cue mod tidy
-
       - name: Publish module
         working-directory: mod
         run: |

@@ -1,0 +1,30 @@
+name: YAML CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+env:
+  YAMLFMT_VERSION: 0.21.0
+  YAMLFMT_SHA256: 1f300d9257b232bb3b541d7fb1b0e6b3c121bcbab381c86cd38cb8722be8a566
+jobs:
+  check:
+    name: Check YAML
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install yamlfmt
+        run: |
+          archive="${RUNNER_TEMP}/yamlfmt.tar.gz"
+          install_dir="${RUNNER_TEMP}/yamlfmt"
+          curl --fail --location --silent --show-error \
+            "https://github.com/google/yamlfmt/releases/download/v${YAMLFMT_VERSION}/yamlfmt_${YAMLFMT_VERSION}_Linux_x86_64.tar.gz" \
+            --output "$archive"
+          printf '%s  %s\n' "$YAMLFMT_SHA256" "$archive" | sha256sum --check -
+          mkdir -p "$install_dir"
+          tar --extract --gzip --file "$archive" --directory "$install_dir" yamlfmt
+          printf '%s\n' "$install_dir" >> "$GITHUB_PATH"
+      - name: Check formatting
+        run: yamlfmt -lint .

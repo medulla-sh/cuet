@@ -1,6 +1,10 @@
 # cuet
 
+[![CLI CI](https://github.com/medulla-sh/cuet/actions/workflows/cli-ci.yml/badge.svg)](https://github.com/medulla-sh/cuet/actions/workflows/cli-ci.yml)
+[![Module CI](https://github.com/medulla-sh/cuet/actions/workflows/mod-ci.yml/badge.svg)](https://github.com/medulla-sh/cuet/actions/workflows/mod-ci.yml)
+[![YAML CI](https://github.com/medulla-sh/cuet/actions/workflows/yaml-ci.yml/badge.svg)](https://github.com/medulla-sh/cuet/actions/workflows/yaml-ci.yml)
 [![CLI Release](https://github.com/medulla-sh/cuet/actions/workflows/cli-release.yml/badge.svg)](https://github.com/medulla-sh/cuet/actions/workflows/cli-release.yml)
+[![Module Release](https://github.com/medulla-sh/cuet/actions/workflows/mod-release.yml/badge.svg)](https://github.com/medulla-sh/cuet/actions/workflows/mod-release.yml)
 
 `cuet` is a framework + CLI for modeling deployment configuration in CUE,
 keeping application deployment concerns close to each app while centralizing

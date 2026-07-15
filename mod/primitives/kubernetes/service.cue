@@ -12,7 +12,7 @@ import T "github.com/medulla-sh/cuet"
 		name: _ | *"\(namespace)-\(serviceName)"
 	}
 
-	ref: "data.kubernetes_service_v1.\(in.name)"
+	ref:              "data.kubernetes_service_v1.\(in.name)"
 	loadBalancerIPv4: "${\(ref).status[0].load_balancer[0].ingress[0].ip}"
 
 	out: T.#TerraformInput & {
