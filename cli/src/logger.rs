@@ -23,7 +23,6 @@ impl Logger {
     }
 }
 
-#[macro_export]
 macro_rules! debug {
     ($logger:expr, $($arg:tt)*) => {
         if $logger.verbose {
@@ -32,7 +31,6 @@ macro_rules! debug {
     };
 }
 
-#[macro_export]
 macro_rules! info {
     ($logger:expr, $($arg:tt)*) => {
         $logger.write(format!($($arg)*));
