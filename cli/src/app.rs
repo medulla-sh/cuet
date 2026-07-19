@@ -25,7 +25,6 @@ pub fn run(cli: Cli) -> Result<ExitStatus> {
 
     let target = target.unwrap_or_default();
     let cue_bin = resolve_tool(&cue_path.unwrap_or_else(|| PathBuf::from(DEFAULT_CUE_BIN)))?;
-    let tf_bin = resolve_tool(&tf_path.unwrap_or_else(|| PathBuf::from(DEFAULT_TF_BIN)))?;
     let current_dir = std::env::current_dir().into_diagnostic()?;
     let workspace = Workspace::resolve(&current_dir, workspace_root.as_deref(), &target.module)?;
     let backend_override_value = if use_local_backend {
@@ -53,7 +52,6 @@ pub fn run(cli: Cli) -> Result<ExitStatus> {
         logger,
         "Configuration:\n    \
             - Cue Bin: {:?}\n    \
-            - Tf Bin: {:?}\n    \
             - Root: {:?}\n    \
             - Module Location: {:?}\n    \
             - Module Name: {}\n    \
@@ -61,7 +59,6 @@ pub fn run(cli: Cli) -> Result<ExitStatus> {
             - Env: {}\n    \
             - Command: {:?}",
         cue_bin,
-        tf_bin,
         workspace.root(),
         workspace.target_dir(),
         workspace.module_name(),
@@ -79,14 +76,18 @@ pub fn run(cli: Cli) -> Result<ExitStatus> {
             &backend_override_value,
             &command,
         ),
-        Commands::Tf { args } => run_tf(
-            &logger,
-            &workspace,
-            &env,
-            &cue_bin,
-            &tf_bin,
-            &backend_override_value,
-            &args,
-        ),
+        Commands::Tf { args } => {
+            let tf_bin = resolve_tool(&tf_path.unwrap_or_else(|| PathBuf::from(DEFAULT_TF_BIN)))?;
+            debug!(logger, "Tf Bin: {:?}", tf_bin);
+            run_tf(
+                &logger,
+                &workspace,
+                &env,
+                &cue_bin,
+                &tf_bin,
+                &backend_override_value,
+                &args,
+            )
+        }
     }
 }
