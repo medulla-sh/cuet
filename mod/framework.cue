@@ -166,7 +166,7 @@ _#DefaultProviderAlias: ""
 		generated: {
 			let metadata = infraThis.#metadata
 
-			for e, _ in #Environments {
+			for e, _ in infraThis["in"] {
 				(e): (_#GenerateTf & {
 					tfConfig: #Terraform & {
 						#metadata: metadata
@@ -182,7 +182,7 @@ _#DefaultProviderAlias: ""
 		}
 
 		out: {
-			for e, _ in #Environments {
+			for e, _ in infraThis["in"] {
 				(e): (#OutputPolicy & {in: infraThis.generated[e]}).out
 			}
 		}
