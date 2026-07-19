@@ -57,6 +57,13 @@ Start here for guides and examples:
 
 ## Quick example
 
+Each module directory has a marker file named `cuet.cue`. List all modules in
+the current workspace with:
+
+```bash
+cuet modules list
+```
+
 ```bash
 cuet -t infra/neon:dev tf init
 cuet -t infra/neon:dev tf plan

@@ -1,8 +1,12 @@
 use crate::cli::ModuleTarget;
 use miette::{IntoDiagnostic, Result};
+use std::ffi::OsStr;
+use std::fs;
 use std::path::{Path, PathBuf};
 
+const MODULE_MARKER: &str = "cuet.cue";
 const WORKSPACE_MARKER: &str = ".cuetroot.cue";
+const IGNORED_DIRECTORIES: [&str; 3] = [".cuet", ".git", "target"];
 
 pub struct Workspace {
     root: PathBuf,
@@ -18,10 +22,7 @@ impl Workspace {
         module: &ModuleTarget,
     ) -> Result<Self> {
         let current_dir = canonicalize_directory(current_dir, "Current directory")?;
-        let root = match root_override {
-            Some(path) => resolve_explicit_root(&current_dir, path)?,
-            None => find_root(&current_dir)?,
-        };
+        let root = resolve_root_from(&current_dir, root_override)?;
         let target = match module {
             ModuleTarget::Relative(path) => {
                 canonicalize_directory(&current_dir.join(path), "Target module")?
@@ -72,6 +73,61 @@ impl Workspace {
     }
 }
 
+pub fn resolve_root(current_dir: &Path, root_override: Option<&Path>) -> Result<PathBuf> {
+    let current_dir = canonicalize_directory(current_dir, "Current directory")?;
+    resolve_root_from(&current_dir, root_override)
+}
+
+pub fn discover_modules(root: &Path) -> Result<Vec<String>> {
+    let root = canonicalize_directory(root, "Workspace root")?;
+    let mut modules = Vec::new();
+    discover_modules_from(&root, &root, &mut modules)?;
+    modules.sort();
+    Ok(modules)
+}
+
+fn discover_modules_from(root: &Path, directory: &Path, modules: &mut Vec<String>) -> Result<()> {
+    if directory.join(MODULE_MARKER).is_file() {
+        let path = directory.strip_prefix(root).into_diagnostic()?;
+        modules.push(if path.as_os_str().is_empty() {
+            ".".to_owned()
+        } else {
+            path.to_str()
+                .ok_or_else(|| miette::miette!("Module path must be valid UTF-8"))?
+                .to_owned()
+        });
+    }
+
+    let entries = fs::read_dir(directory).into_diagnostic().map_err(|error| {
+        miette::miette!(
+            "Could not read directory '{}': {error}",
+            directory.display()
+        )
+    })?;
+    for entry in entries {
+        let entry = entry.into_diagnostic()?;
+        let file_type = entry.file_type().into_diagnostic()?;
+        if file_type.is_symlink() || !file_type.is_dir() {
+            continue;
+        }
+        if IGNORED_DIRECTORIES
+            .iter()
+            .any(|name| entry.file_name() == OsStr::new(name))
+        {
+            continue;
+        }
+        discover_modules_from(root, &entry.path(), modules)?;
+    }
+    Ok(())
+}
+
+fn resolve_root_from(current_dir: &Path, root_override: Option<&Path>) -> Result<PathBuf> {
+    match root_override {
+        Some(path) => resolve_explicit_root(current_dir, path),
+        None => find_root(current_dir),
+    }
+}
+
 fn canonicalize_directory(path: &Path, label: &str) -> Result<PathBuf> {
     let path = path.canonicalize().into_diagnostic().map_err(|error| {
         miette::miette!(
@@ -119,11 +175,13 @@ fn find_root(start_path: &Path) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Workspace, find_root};
+    use super::{Workspace, discover_modules, find_root, resolve_root};
     use crate::cli::ModuleTarget;
     use crate::test_support::TestDirectory;
     use miette::{IntoDiagnostic, Result};
+    use std::ffi::OsString;
     use std::fs;
+    use std::os::unix::ffi::OsStringExt;
     use std::os::unix::fs::symlink;
     use std::path::{Path, PathBuf};
 
@@ -146,6 +204,85 @@ mod tests {
         let root = find_root(&module)?;
 
         assert_eq!(root, nested_workspace);
+        Ok(())
+    }
+
+    #[test]
+    fn test_resolve_root_works_from_nested_directory() -> Result<()> {
+        let temp = TestDirectory::new()?;
+        let root = create_workspace(&temp)?;
+        let nested = root.join("infra/neon");
+        fs::create_dir_all(&nested).into_diagnostic()?;
+
+        let resolved = resolve_root(&nested, None)?;
+
+        assert_eq!(resolved, root);
+        Ok(())
+    }
+
+    #[test]
+    fn test_discover_modules_returns_sorted_relative_paths() -> Result<()> {
+        let temp = TestDirectory::new()?;
+        let root = create_workspace(&temp)?;
+        let nested = root.join("services/auth/api");
+        let sibling = root.join("infra/database");
+        fs::create_dir_all(&nested).into_diagnostic()?;
+        fs::create_dir_all(&sibling).into_diagnostic()?;
+        fs::write(root.join("cuet.cue"), "").into_diagnostic()?;
+        fs::write(nested.join("cuet.cue"), "").into_diagnostic()?;
+        fs::write(sibling.join("cuet.cue"), "").into_diagnostic()?;
+
+        let modules = discover_modules(&root)?;
+
+        assert_eq!(modules, [".", "infra/database", "services/auth/api",]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_discover_modules_ignores_generated_trees() -> Result<()> {
+        let temp = TestDirectory::new()?;
+        let root = create_workspace(&temp)?;
+        for directory in [".cuet/generated", ".git/worktree", "target/debug"] {
+            let directory = root.join(directory);
+            fs::create_dir_all(&directory).into_diagnostic()?;
+            fs::write(directory.join("cuet.cue"), "").into_diagnostic()?;
+        }
+        let module = root.join("infra/real");
+        fs::create_dir_all(&module).into_diagnostic()?;
+        fs::write(module.join("cuet.cue"), "").into_diagnostic()?;
+
+        let modules = discover_modules(&root)?;
+
+        assert_eq!(modules, ["infra/real"]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_discover_modules_does_not_follow_symlinks() -> Result<()> {
+        let temp = TestDirectory::new()?;
+        let root = create_workspace(&temp)?;
+        let external = temp.path().join("external/module");
+        fs::create_dir_all(&external).into_diagnostic()?;
+        fs::write(external.join("cuet.cue"), "").into_diagnostic()?;
+        symlink(temp.path().join("external"), root.join("linked")).into_diagnostic()?;
+
+        let modules = discover_modules(&root)?;
+
+        assert!(modules.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_discover_modules_rejects_non_utf8_path() -> Result<()> {
+        let temp = TestDirectory::new()?;
+        let root = create_workspace(&temp)?;
+        let module = root.join(OsString::from_vec(vec![b'm', 0xff]));
+        fs::create_dir(&module).into_diagnostic()?;
+        fs::write(module.join("cuet.cue"), "").into_diagnostic()?;
+
+        let error = discover_modules(&root).expect_err("non-UTF-8 module should fail");
+
+        assert!(error.to_string().contains("must be valid UTF-8"));
         Ok(())
     }
 

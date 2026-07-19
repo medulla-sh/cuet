@@ -12,8 +12,9 @@ mod test_support;
 mod workspace;
 
 fn main() -> Result<()> {
-    let status = app::run(cli::Cli::parse())?;
-    if !status.success() {
+    if let Some(status) = app::run(cli::Cli::parse())?
+        && !status.success()
+    {
         std::process::exit(status.code().unwrap_or(1));
     }
     Ok(())

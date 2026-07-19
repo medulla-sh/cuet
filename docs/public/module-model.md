@@ -4,8 +4,8 @@ This page describes the main objects in `cuet` and how they relate.
 
 ## Core objects
 
-- **Module**: a CUE package that embeds `I.#InfraModule` and defines
-  environment-specific infra.
+- **Module**: a directory with a required `cuet.cue` marker whose CUE package
+  embeds `I.#InfraModule` and defines environment-specific infra.
 - **Environment**: a named deployment target (for example `dev`, `internal`,
   `global`) declared by the base infra config.
 - **Input graph** (`infra.in`): per-environment deployment input assembled from

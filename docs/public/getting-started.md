@@ -8,9 +8,12 @@ current execution backend (OpenTofu/Terraform).
 - `cue` available on your `PATH`
 - `tofu` (or Terraform via `--tf-path`) available on your `PATH`
 - A repository with a `.cuetroot.cue` marker at the workspace root
-- A module CUE file that composes your base infra module
+- A `cuet.cue` marker file in each module directory
 
 ## Minimal module
+
+The marker can also contain module configuration. Save this example as
+`infra/neon/cuet.cue`:
 
 ```cue
 package neon
@@ -64,6 +67,17 @@ cuet tf plan
 
 Non-interactive commands must provide `:ENV` when multiple populated
 environments exist.
+
+## Discover modules
+
+List every module from anywhere inside the workspace:
+
+```bash
+cuet modules list
+```
+
+The command prints sorted, workspace-relative directories containing
+`cuet.cue`. It does not require CUE, OpenTofu, or an environment.
 
 ## Useful commands
 

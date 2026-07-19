@@ -95,6 +95,12 @@ pub fn parse_env(value: &str) -> Result<Env, String> {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
+    /// Manage modules in the cuet workspace
+    Modules {
+        #[command(subcommand)]
+        command: ModulesCommand,
+    },
+
     Cue {
         #[command(subcommand)]
         command: CueCommand,
@@ -104,6 +110,12 @@ pub enum Commands {
         #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
         args: Vec<String>,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ModulesCommand {
+    /// List modules in the cuet workspace
+    List,
 }
 
 #[derive(Subcommand, Debug)]
@@ -137,8 +149,9 @@ impl CueCommand {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Commands, CueCommand, ModuleTarget, Target};
+    use super::{Cli, Commands, CueCommand, ModuleTarget, ModulesCommand, Target};
     use clap::Parser;
+    use clap::error::ErrorKind;
     use std::path::PathBuf;
 
     #[test]
@@ -228,6 +241,29 @@ mod tests {
                 module: ModuleTarget::Relative(PathBuf::from("../neon")),
                 environment: None,
             })
+        );
+    }
+
+    #[test]
+    fn test_cli_parses_modules_without_target() {
+        let cli = Cli::try_parse_from(["cuet", "modules", "list"]).unwrap();
+
+        assert!(cli.target.is_none());
+        assert!(matches!(
+            cli.command,
+            Commands::Modules {
+                command: ModulesCommand::List
+            }
+        ));
+    }
+
+    #[test]
+    fn test_cli_requires_modules_subcommand() {
+        let error = Cli::try_parse_from(["cuet", "modules"]).unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
         );
     }
 
