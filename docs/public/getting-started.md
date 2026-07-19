@@ -23,7 +23,7 @@ import (
 
 I.#InfraModule
 
-infra: {
+infra: in: {
     dev: {
         (google.#Secret & {in: secretId: "neon-dev"}).out
         (neon.#ApiKey & {in: name: "neon-dev"}).out
