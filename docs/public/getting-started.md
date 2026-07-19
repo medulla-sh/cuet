@@ -53,6 +53,18 @@ cuet -t /infra/neon:dev tf plan
 cuet -w /path/to/workspace -t /infra/neon:dev tf plan
 ```
 
+The module and environment are independently optional. `-t :dev` selects `dev`
+in the current module. When the environment is omitted, `cuet` automatically
+uses the only populated environment or prompts when several exist:
+
+```bash
+cuet -t infra/neon tf plan
+cuet tf plan
+```
+
+Non-interactive commands must provide `:ENV` when multiple populated
+environments exist.
+
 ## Useful commands
 
 ```bash

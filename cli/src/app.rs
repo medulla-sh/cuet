@@ -1,4 +1,5 @@
 use crate::cli::{Cli, Commands};
+use crate::environment;
 use crate::execution::{resolve_tool, run_cue, run_tf};
 use crate::logger::Logger;
 use crate::workspace::Workspace;
@@ -23,9 +24,6 @@ pub fn run(cli: Cli) -> Result<ExitStatus> {
     } = cli;
 
     let target = target.unwrap_or_default();
-    let env = target.environment.ok_or_else(|| {
-        miette::miette!("No environment selected; add ':ENV' to -t (for example, '-t :dev')")
-    })?;
     let cue_bin = resolve_tool(&cue_path.unwrap_or_else(|| PathBuf::from(DEFAULT_CUE_BIN)))?;
     let tf_bin = resolve_tool(&tf_path.unwrap_or_else(|| PathBuf::from(DEFAULT_TF_BIN)))?;
     let current_dir = std::env::current_dir().into_diagnostic()?;
@@ -36,6 +34,20 @@ pub fn run(cli: Cli) -> Result<ExitStatus> {
         Cow::Borrowed("null")
     };
     let logger = Logger::new(verbose);
+    let env = target.environment.map_or_else(
+        || {
+            debug!(logger, "Discovering populated environments");
+            environment::discover(&cue_bin, &workspace, &backend_override_value)
+        },
+        Ok,
+    )?;
+
+    info!(
+        logger,
+        "Module: {}\nEnvironment: {}",
+        workspace.module_name(),
+        env
+    );
 
     debug!(
         logger,

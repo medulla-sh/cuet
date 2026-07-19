@@ -82,7 +82,7 @@ pub enum ModuleTarget {
     WorkspaceRelative(PathBuf),
 }
 
-fn parse_env(value: &str) -> Result<Env, String> {
+pub fn parse_env(value: &str) -> Result<Env, String> {
     if value.is_empty()
         || !value
             .chars()

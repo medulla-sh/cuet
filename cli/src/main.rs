@@ -5,6 +5,7 @@ use miette::Result;
 mod logger;
 mod app;
 mod cli;
+mod environment;
 mod execution;
 #[cfg(test)]
 mod test_support;

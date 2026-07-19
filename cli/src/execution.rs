@@ -1,4 +1,4 @@
-use crate::cli::CueCommand;
+use crate::cli::{CueCommand, Env};
 use crate::logger::Logger;
 use crate::workspace::Workspace;
 use miette::{IntoDiagnostic, Result};
@@ -9,19 +9,25 @@ use std::process::{Command, ExitStatus, Stdio};
 const OUTPUT_FOLDER_NAME: &str = ".cuet";
 const OUTPUT_FILE_NAME: &str = "main.tf.json";
 
-fn export_expression(workspace: &Workspace, env: &str, backend_override_value: &str) -> String {
+fn metadata_expression(workspace: &Workspace, backend_override_value: &str) -> String {
+    let module = serde_json::Value::String(workspace.module_name().to_owned());
     format!(
-        r#"((infra & {{ #metadata: {{ module: "{}", localBackendOverride: {} }} }}).out)["{}"]"#,
-        workspace.module_name(),
-        backend_override_value,
-        env
+        "{{ #metadata: {{ module: {module}, localBackendOverride: {backend_override_value} }} }}"
+    )
+}
+
+fn export_expression(workspace: &Workspace, env: &Env, backend_override_value: &str) -> String {
+    let environment = serde_json::Value::String(env.clone());
+    format!(
+        "((infra & {}).out)[{environment}]",
+        metadata_expression(workspace, backend_override_value)
     )
 }
 
 fn cue_command(
     cue_bin: &Path,
     workspace: &Workspace,
-    env: &str,
+    env: &Env,
     backend_override_value: &str,
     command: &CueCommand,
 ) -> Command {
@@ -43,7 +49,7 @@ fn cue_command(
 fn terraform_export_command(
     cue_bin: &Path,
     workspace: &Workspace,
-    env: &str,
+    env: &Env,
     backend_override_value: &str,
     output_file: &Path,
 ) -> Result<Command> {
@@ -81,7 +87,7 @@ fn terraform_command(tf_bin: &Path, output_dir: &Path, args: &[String]) -> Comma
 pub fn run_cue(
     logger: &Logger,
     workspace: &Workspace,
-    env: &str,
+    env: &Env,
     cue_bin: &Path,
     backend_override_value: &str,
     command: &CueCommand,
@@ -102,7 +108,7 @@ pub fn run_cue(
 pub fn run_tf(
     logger: &Logger,
     workspace: &Workspace,
-    env: &str,
+    env: &Env,
     cue_bin: &Path,
     tf_bin: &Path,
     backend_override_value: &str,
@@ -162,12 +168,16 @@ mod tests {
     use crate::workspace::Workspace;
     use miette::{IntoDiagnostic, Result};
     use std::ffi::OsStr;
-    use std::fs;
+    use std::fs::{self, File};
+    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
 
     fn write_executable(path: &Path, body: &str) -> Result<()> {
-        fs::write(path, body).into_diagnostic()?;
+        let mut file = File::create(path).into_diagnostic()?;
+        file.write_all(body.as_bytes()).into_diagnostic()?;
+        file.sync_all().into_diagnostic()?;
+        drop(file);
         fs::set_permissions(path, fs::Permissions::from_mode(0o755)).into_diagnostic()
     }
 
@@ -183,10 +193,11 @@ mod tests {
     fn test_cue_command_uses_module_metadata() -> Result<()> {
         let temp = TestDirectory::new()?;
         let workspace = test_workspace(&temp)?;
+        let env = "dev".to_owned();
         let command = cue_command(
             Path::new("cue"),
             &workspace,
-            "dev",
+            &env,
             "null",
             &CueCommand::Export {
                 args: vec!["--out".to_owned(), "yaml".to_owned()],
@@ -225,11 +236,12 @@ mod tests {
             &format!("#!/bin/sh\ntouch '{}'\n", tf_marker.display()),
         )?;
         let workspace = test_workspace(&temp)?;
+        let env = "dev".to_owned();
 
         let status = run_tf(
             &Logger::new(false),
             &workspace,
-            "dev",
+            &env,
             &cue_bin,
             &tf_bin,
             "null",
@@ -249,11 +261,12 @@ mod tests {
         write_executable(&cue_bin, "#!/bin/sh\nexit 0\n")?;
         write_executable(&tf_bin, "#!/bin/sh\nexit 19\n")?;
         let workspace = test_workspace(&temp)?;
+        let env = "dev".to_owned();
 
         let status = run_tf(
             &Logger::new(false),
             &workspace,
-            "dev",
+            &env,
             &cue_bin,
             &tf_bin,
             "null",
