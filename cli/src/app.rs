@@ -2,7 +2,7 @@ use crate::cli::{Cli, Commands};
 use crate::execution::{resolve_tool, run_cue, run_tf};
 use crate::logger::Logger;
 use crate::workspace::Workspace;
-use miette::Result;
+use miette::{IntoDiagnostic, Result};
 use std::borrow::Cow;
 use std::path::PathBuf;
 use std::process::ExitStatus;
@@ -14,17 +14,22 @@ const LOCAL_STATE_FILE_NAME: &str = "local.tfstate";
 pub fn run(cli: Cli) -> Result<ExitStatus> {
     let Cli {
         verbose,
-        path,
+        target,
+        workspace: workspace_root,
         cue_path,
         tf_path,
-        env,
         use_local_backend,
         command,
     } = cli;
 
+    let target = target.unwrap_or_default();
+    let env = target.environment.ok_or_else(|| {
+        miette::miette!("No environment selected; add ':ENV' to -t (for example, '-t :dev')")
+    })?;
     let cue_bin = resolve_tool(&cue_path.unwrap_or_else(|| PathBuf::from(DEFAULT_CUE_BIN)))?;
     let tf_bin = resolve_tool(&tf_path.unwrap_or_else(|| PathBuf::from(DEFAULT_TF_BIN)))?;
-    let workspace = Workspace::resolve(path)?;
+    let current_dir = std::env::current_dir().into_diagnostic()?;
+    let workspace = Workspace::resolve(&current_dir, workspace_root.as_deref(), &target.module)?;
     let backend_override_value = if use_local_backend {
         Cow::Owned(format!("\"{LOCAL_STATE_FILE_NAME}\""))
     } else {

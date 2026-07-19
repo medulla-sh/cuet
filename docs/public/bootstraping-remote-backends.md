@@ -16,11 +16,11 @@ Use `--use-local-backend` to bootstrap safely.
 
 ```bash
 # 1) Local state bootstrap
-cuet -p infra/backends dev --use-local-backend tf init
-cuet -p infra/backends dev --use-local-backend tf apply
+cuet -t infra/backends:dev --use-local-backend tf init
+cuet -t infra/backends:dev --use-local-backend tf apply
 
 # 2) Switch to remote backend
-cuet -p infra/backends dev tf init -migrate-state
+cuet -t infra/backends:dev tf init -migrate-state
 ```
 
 `--use-local-backend` makes `cuet` inject a local backend path (`local.tfstate`)

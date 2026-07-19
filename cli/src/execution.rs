@@ -156,7 +156,7 @@ pub fn resolve_tool(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{cue_command, run_tf};
-    use crate::cli::CueCommand;
+    use crate::cli::{CueCommand, ModuleTarget};
     use crate::logger::Logger;
     use crate::test_support::TestDirectory;
     use crate::workspace::Workspace;
@@ -164,7 +164,7 @@ mod tests {
     use std::ffi::OsStr;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     fn write_executable(path: &Path, body: &str) -> Result<()> {
         fs::write(path, body).into_diagnostic()?;
@@ -176,7 +176,7 @@ mod tests {
         let module = root.join("infra/neon");
         fs::create_dir_all(&module).into_diagnostic()?;
         fs::write(root.join(".cuetroot.cue"), "").into_diagnostic()?;
-        Workspace::resolve(Some(module))
+        Workspace::resolve(&module, None, &ModuleTarget::Relative(PathBuf::from(".")))
     }
 
     #[test]

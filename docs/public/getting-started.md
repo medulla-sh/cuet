@@ -34,8 +34,8 @@ infra: {
 ## Run the module
 
 ```bash
-cuet -p infra/neon dev tf init
-cuet -p infra/neon dev tf plan
+cuet -t infra/neon:dev tf init
+cuet -t infra/neon:dev tf plan
 ```
 
 `cuet` will:
@@ -44,15 +44,24 @@ cuet -p infra/neon dev tf plan
 1. Write `.cuet/dev/main.tf.json` under the module directory.
 1. Execute `tofu` in that generated directory.
 
+The module target is relative to the current directory. Start it with `/` to
+resolve it from the cuet workspace root, or set the exact workspace root with
+`-w`:
+
+```bash
+cuet -t /infra/neon:dev tf plan
+cuet -w /path/to/workspace -t /infra/neon:dev tf plan
+```
+
 ## Useful commands
 
 ```bash
 # Inspect evaluated output for an environment
-cuet -p infra/neon dev cue export
+cuet -t infra/neon:dev cue export
 
 # Run with verbose logs
-cuet -v -p infra/neon dev tf plan
+cuet -v -t infra/neon:dev tf plan
 
 # Override tool locations
-cuet --cue-path /path/to/cue --tf-path /path/to/tofu -p infra/neon dev tf plan
+cuet --cue-path /path/to/cue --tf-path /path/to/tofu -t infra/neon:dev tf plan
 ```

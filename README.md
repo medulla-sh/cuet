@@ -58,8 +58,8 @@ Start here for guides and examples:
 ## Quick example
 
 ```bash
-cuet -p infra/neon dev tf init
-cuet -p infra/neon dev tf plan
+cuet -t infra/neon:dev tf init
+cuet -t infra/neon:dev tf plan
 ```
 
 This will:
@@ -71,5 +71,5 @@ This will:
 To bootstrap a backend for a new environment, use local state first:
 
 ```bash
-cuet -p infra/neon dev --use-local-backend tf init
+cuet -t infra/neon:dev --use-local-backend tf init
 ```
