@@ -116,6 +116,8 @@ pub enum Commands {
 pub enum ModulesCommand {
     /// List modules in the cuet workspace
     List,
+    /// Validate every populated environment in the cuet workspace
+    Check,
 }
 
 #[derive(Subcommand, Debug)]
@@ -253,6 +255,18 @@ mod tests {
             cli.command,
             Commands::Modules {
                 command: ModulesCommand::List
+            }
+        ));
+    }
+
+    #[test]
+    fn test_cli_parses_modules_check() {
+        let cli = Cli::try_parse_from(["cuet", "modules", "check"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Commands::Modules {
+                command: ModulesCommand::Check
             }
         ));
     }

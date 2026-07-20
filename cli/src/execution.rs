@@ -4,7 +4,7 @@ use crate::workspace::Workspace;
 use miette::{IntoDiagnostic, Result};
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus, Output, Stdio};
 
 const OUTPUT_FOLDER_NAME: &str = ".cuet";
 const OUTPUT_FILE_NAME: &str = "main.tf.json";
@@ -103,6 +103,27 @@ pub fn run_cue(
         logger,
         &mut cue_command(cue_bin, workspace, env, backend_override_value, command),
     )
+}
+
+/// Checks whether a module environment can be exported without writing output.
+pub fn check_cue_export(
+    workspace: &Workspace,
+    env: &Env,
+    cue_bin: &Path,
+    backend_override_value: &str,
+) -> Result<Output> {
+    let mut process = cue_command(
+        cue_bin,
+        workspace,
+        env,
+        backend_override_value,
+        &CueCommand::Export { args: Vec::new() },
+    );
+    process
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    process.output().into_diagnostic()
 }
 
 pub fn run_tf(

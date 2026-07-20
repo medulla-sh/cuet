@@ -62,7 +62,11 @@ the current workspace with:
 
 ```bash
 cuet modules list
+cuet modules check
 ```
+
+`modules check` validates every populated environment with CUE. It does not
+require OpenTofu or cloud credentials.
 
 ```bash
 cuet -t infra/neon:dev tf init

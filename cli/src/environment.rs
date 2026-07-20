@@ -25,7 +25,8 @@ pub fn discover(
     )
 }
 
-fn populated(
+/// Returns every populated environment in a module.
+pub fn populated(
     cue_bin: &Path,
     workspace: &Workspace,
     backend_override_value: &str,

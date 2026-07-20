@@ -79,6 +79,16 @@ cuet modules list
 The command prints sorted, workspace-relative directories containing
 `cuet.cue`. It does not require CUE, OpenTofu, or an environment.
 
+Validate every populated environment in every module with:
+
+```bash
+cuet modules check
+```
+
+The command reports all invalid module/environment pairs after checking the
+whole workspace. It requires CUE, but does not require OpenTofu or cloud
+credentials.
+
 ## Useful commands
 
 ```bash
