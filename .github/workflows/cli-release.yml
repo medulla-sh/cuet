@@ -106,7 +106,7 @@ jobs:
           cp "target/${TARGET}/release/cuet" "dist/${ASSET_NAME}/cuet"
           cp ../LICENSE "dist/${ASSET_NAME}/LICENSE"
           tar -C dist -czf "dist/${ASSET_NAME}.tar.gz" "${ASSET_NAME}"
-          shasum -a 256 "dist/${ASSET_NAME}.tar.gz" > "dist/${ASSET_NAME}.tar.gz.sha256"
+          (cd dist && shasum -a 256 "${ASSET_NAME}.tar.gz" > "${ASSET_NAME}.tar.gz.sha256")
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
