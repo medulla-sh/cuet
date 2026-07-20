@@ -3,11 +3,14 @@ use crate::logger::Logger;
 use crate::workspace::Workspace;
 use miette::{IntoDiagnostic, Result};
 use std::borrow::Cow;
+use std::io;
+use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Output, Stdio};
 
 const OUTPUT_FOLDER_NAME: &str = ".cuet";
 const OUTPUT_FILE_NAME: &str = "main.tf.json";
+const TERRAFORM_INIT_STATE_FILE: &str = ".terraform/terraform.tfstate";
 
 fn metadata_expression(workspace: &Workspace, backend_override_value: &str) -> String {
     let module = serde_json::Value::String(workspace.module_name().to_owned());
@@ -84,6 +87,41 @@ fn terraform_command(tf_bin: &Path, output_dir: &Path, args: &[String]) -> Comma
     process
 }
 
+fn terraform_init_command(
+    tf_bin: &Path,
+    output_dir: &Path,
+    global_args: &[String],
+) -> Result<Command> {
+    // Keep requested command output isolated on stdout while retaining init prompts.
+    let stderr = io::stderr()
+        .as_fd()
+        .try_clone_to_owned()
+        .into_diagnostic()?;
+    let args: Vec<_> = global_args
+        .iter()
+        .cloned()
+        .chain(std::iter::once("init".to_owned()))
+        .collect();
+    let mut process = terraform_command(tf_bin, output_dir, &args);
+    process.stdout(Stdio::from(stderr));
+    Ok(process)
+}
+
+fn terraform_subcommand(args: &[String]) -> Option<(usize, &str)> {
+    args.iter()
+        .enumerate()
+        .find(|(_, argument)| !argument.starts_with('-'))
+        .map(|(index, argument)| (index, argument.as_str()))
+}
+
+fn terraform_initialized(output_dir: &Path, global_args: &[String]) -> bool {
+    let working_dir = global_args
+        .iter()
+        .find_map(|argument| argument.strip_prefix("-chdir="))
+        .map_or_else(|| output_dir.to_owned(), |path| output_dir.join(path));
+    working_dir.join(TERRAFORM_INIT_STATE_FILE).is_file()
+}
+
 pub fn run_cue(
     logger: &Logger,
     workspace: &Workspace,
@@ -155,6 +193,19 @@ pub fn run_tf(
         return Ok(export_status);
     }
 
+    if let Some((index, command)) = terraform_subcommand(args)
+        && command != "init"
+        && !terraform_initialized(&output_dir, &args[..index])
+    {
+        let init_status = run_command(
+            logger,
+            &mut terraform_init_command(tf_bin, &output_dir, &args[..index])?,
+        )?;
+        if !init_status.success() {
+            return Ok(init_status);
+        }
+    }
+
     run_command(logger, &mut terraform_command(tf_bin, &output_dir, args))
 }
 
@@ -182,7 +233,7 @@ pub fn resolve_tool(path: &Path) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{cue_command, run_tf};
+    use super::{OUTPUT_FOLDER_NAME, TERRAFORM_INIT_STATE_FILE, cue_command, run_tf};
     use crate::cli::{CueCommand, ModuleTarget};
     use crate::logger::Logger;
     use crate::test_support::TestDirectory;
@@ -280,7 +331,10 @@ mod tests {
         let cue_bin = temp.path().join("cue");
         let tf_bin = temp.path().join("tofu");
         write_executable(&cue_bin, "#!/bin/sh\nexit 0\n")?;
-        write_executable(&tf_bin, "#!/bin/sh\nexit 19\n")?;
+        write_executable(
+            &tf_bin,
+            "#!/bin/sh\nif [ \"$1\" = init ]; then exit 0; fi\nexit 19\n",
+        )?;
         let workspace = test_workspace(&temp)?;
         let env = "dev".to_owned();
 
@@ -295,6 +349,210 @@ mod tests {
         )?;
 
         assert_eq!(status.code(), Some(19));
+        Ok(())
+    }
+
+    #[test]
+    fn test_terraform_initializes_only_fresh_directories() -> Result<()> {
+        let temp = TestDirectory::new()?;
+        let cue_bin = temp.path().join("cue");
+        let tf_bin = temp.path().join("tofu");
+        let tf_marker = temp.path().join("tofu-ran");
+        write_executable(&cue_bin, "#!/bin/sh\nexit 0\n")?;
+        write_executable(
+            &tf_bin,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
+                tf_marker.display()
+            ),
+        )?;
+        let workspace = test_workspace(&temp)?;
+        let env = "dev".to_owned();
+
+        let fresh_status = run_tf(
+            &Logger::new(false),
+            &workspace,
+            &env,
+            &cue_bin,
+            &tf_bin,
+            "null",
+            &["output".to_owned(), "-json".to_owned()],
+        )?;
+        let output_dir = workspace.target_dir().join(OUTPUT_FOLDER_NAME).join(&env);
+        let init_state = output_dir.join(TERRAFORM_INIT_STATE_FILE);
+        fs::create_dir_all(init_state.parent().expect("state should have parent"))
+            .into_diagnostic()?;
+        fs::write(init_state, "").into_diagnostic()?;
+        let existing_status = run_tf(
+            &Logger::new(false),
+            &workspace,
+            &env,
+            &cue_bin,
+            &tf_bin,
+            "null",
+            &["output".to_owned(), "-json".to_owned()],
+        )?;
+
+        assert!(fresh_status.success());
+        assert!(existing_status.success());
+        assert_eq!(
+            fs::read_to_string(tf_marker).into_diagnostic()?,
+            "init\noutput -json\noutput -json\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_terraform_partial_init_is_retried() -> Result<()> {
+        let temp = TestDirectory::new()?;
+        let cue_bin = temp.path().join("cue");
+        let tf_bin = temp.path().join("tofu");
+        let tf_marker = temp.path().join("tofu-ran");
+        write_executable(&cue_bin, "#!/bin/sh\nexit 0\n")?;
+        write_executable(
+            &tf_bin,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
+                tf_marker.display()
+            ),
+        )?;
+        let workspace = test_workspace(&temp)?;
+        let env = "dev".to_owned();
+        fs::create_dir_all(
+            workspace
+                .target_dir()
+                .join(OUTPUT_FOLDER_NAME)
+                .join(&env)
+                .join(".terraform"),
+        )
+        .into_diagnostic()?;
+
+        let status = run_tf(
+            &Logger::new(false),
+            &workspace,
+            &env,
+            &cue_bin,
+            &tf_bin,
+            "null",
+            &["plan".to_owned()],
+        )?;
+
+        assert!(status.success());
+        assert_eq!(
+            fs::read_to_string(tf_marker).into_diagnostic()?,
+            "init\nplan\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_terraform_init_failure_skips_command() -> Result<()> {
+        let temp = TestDirectory::new()?;
+        let cue_bin = temp.path().join("cue");
+        let tf_bin = temp.path().join("tofu");
+        let tf_marker = temp.path().join("tofu-ran");
+        write_executable(&cue_bin, "#!/bin/sh\nexit 0\n")?;
+        write_executable(
+            &tf_bin,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = init ]; then exit 17; fi\n",
+                tf_marker.display()
+            ),
+        )?;
+        let workspace = test_workspace(&temp)?;
+        let env = "dev".to_owned();
+
+        let status = run_tf(
+            &Logger::new(false),
+            &workspace,
+            &env,
+            &cue_bin,
+            &tf_bin,
+            "null",
+            &["plan".to_owned()],
+        )?;
+
+        assert_eq!(status.code(), Some(17));
+        assert_eq!(fs::read_to_string(tf_marker).into_diagnostic()?, "init\n");
+        Ok(())
+    }
+
+    #[test]
+    fn test_explicit_terraform_init_runs_once() -> Result<()> {
+        let temp = TestDirectory::new()?;
+        let cue_bin = temp.path().join("cue");
+        let tf_bin = temp.path().join("tofu");
+        let tf_marker = temp.path().join("tofu-ran");
+        write_executable(&cue_bin, "#!/bin/sh\nexit 0\n")?;
+        write_executable(
+            &tf_bin,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
+                tf_marker.display()
+            ),
+        )?;
+        let workspace = test_workspace(&temp)?;
+        let env = "dev".to_owned();
+
+        let status = run_tf(
+            &Logger::new(false),
+            &workspace,
+            &env,
+            &cue_bin,
+            &tf_bin,
+            "null",
+            &[
+                "-chdir=other".to_owned(),
+                "init".to_owned(),
+                "-upgrade".to_owned(),
+            ],
+        )?;
+
+        assert!(status.success());
+        assert_eq!(
+            fs::read_to_string(tf_marker).into_diagnostic()?,
+            "-chdir=other init -upgrade\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_terraform_init_preserves_global_arguments() -> Result<()> {
+        let temp = TestDirectory::new()?;
+        let cue_bin = temp.path().join("cue");
+        let tf_bin = temp.path().join("tofu");
+        let tf_marker = temp.path().join("tofu-ran");
+        write_executable(&cue_bin, "#!/bin/sh\nexit 0\n")?;
+        write_executable(
+            &tf_bin,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
+                tf_marker.display()
+            ),
+        )?;
+        let workspace = test_workspace(&temp)?;
+        let env = "dev".to_owned();
+        let output_dir = workspace.target_dir().join(OUTPUT_FOLDER_NAME).join(&env);
+        let init_state = output_dir.join(TERRAFORM_INIT_STATE_FILE);
+        fs::create_dir_all(init_state.parent().expect("state should have parent"))
+            .into_diagnostic()?;
+        fs::write(init_state, "").into_diagnostic()?;
+
+        let status = run_tf(
+            &Logger::new(false),
+            &workspace,
+            &env,
+            &cue_bin,
+            &tf_bin,
+            "null",
+            &["-chdir=other".to_owned(), "plan".to_owned()],
+        )?;
+
+        assert!(status.success());
+        assert_eq!(
+            fs::read_to_string(tf_marker).into_diagnostic()?,
+            "-chdir=other init\n-chdir=other plan\n"
+        );
         Ok(())
     }
 }

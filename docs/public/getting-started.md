@@ -37,7 +37,6 @@ infra: in: {
 ## Run the module
 
 ```bash
-cuet -t infra/neon:dev tf init
 cuet -t infra/neon:dev tf plan
 ```
 
@@ -45,7 +44,13 @@ cuet -t infra/neon:dev tf plan
 
 1. Evaluate the selected module and environment.
 1. Write `.cuet/dev/main.tf.json` under the module directory.
-1. Execute `tofu` in that generated directory.
+1. Execute `tofu init` in that generated directory.
+1. Execute the requested `tofu` command after initialization succeeds.
+
+Cuet runs initialization only when the generated directory does not contain
+OpenTofu backend metadata. Initialization uses OpenTofu's default interactive
+behavior. If the backend needs migration or reconfiguration, run `cuet tf init`
+explicitly with the appropriate OpenTofu options.
 
 The module target is relative to the current directory. Start it with `/` to
 resolve it from the cuet workspace root, or set the exact workspace root with
@@ -94,6 +99,9 @@ credentials.
 ```bash
 # Inspect evaluated output for an environment
 cuet -t infra/neon:dev cue export
+
+# Read Terraform outputs after automatic initialization
+cuet -t infra/neon:dev tf output -json
 
 # Run with verbose logs
 cuet -v -t infra/neon:dev tf plan

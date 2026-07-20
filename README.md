@@ -69,7 +69,6 @@ cuet modules check
 require OpenTofu or cloud credentials.
 
 ```bash
-cuet -t infra/neon:dev tf init
 cuet -t infra/neon:dev tf plan
 ```
 
@@ -77,7 +76,13 @@ This will:
 
 1. Evaluate the CUE module at `infra/neon` for `dev`.
 1. Generate `.cuet/dev/main.tf.json`.
-1. Run `tofu init` or `tofu plan` in that generated folder.
+1. Run `tofu init` in that generated folder.
+1. Run `tofu plan` after initialization succeeds.
+
+Every `cuet tf` command initializes the generated working directory when it
+does not contain OpenTofu backend metadata. Explicit `cuet tf init` commands
+run only the requested initialization, so backend migration and reconfiguration
+options remain under your control.
 
 To bootstrap a backend for a new environment, use local state first:
 
