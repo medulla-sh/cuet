@@ -10,12 +10,34 @@ use std::process::{Command, ExitStatus, Output, Stdio};
 
 const OUTPUT_FOLDER_NAME: &str = ".cuet";
 const OUTPUT_FILE_NAME: &str = "main.tf.json";
+const TFMIGRATE_FILE_NAME: &str = "tfmigrate.json";
 const TERRAFORM_INIT_STATE_FILE: &str = ".terraform/terraform.tfstate";
+const TFMIGRATE_OVERRIDE_FILE: &str = "_tfmigrate_override.tf";
 
 fn metadata_expression(workspace: &Workspace, backend_override_value: &str) -> String {
-    let module = serde_json::Value::String(workspace.module_name().to_owned());
+    metadata_expression_for_module(workspace.module_name(), backend_override_value)
+}
+
+fn metadata_expression_for_module(module: &str, backend_override_value: &str) -> String {
+    let module = serde_json::Value::String(module.to_owned());
     format!(
         "{{ #metadata: {{ module: {module}, localBackendOverride: {backend_override_value} }} }}"
+    )
+}
+
+fn migration_expression(workspace: &Workspace, env: &Env, backend_override_value: &str) -> String {
+    let environment = serde_json::Value::String(env.clone());
+    format!(
+        "((infra & {}).#migration)[{environment}]",
+        metadata_expression(workspace, backend_override_value)
+    )
+}
+
+fn backend_expression(module: &str, env: &Env, backend_override_value: &str) -> String {
+    let environment = serde_json::Value::String(env.clone());
+    format!(
+        "((infra & {}).#backends)[{environment}]",
+        metadata_expression_for_module(module, backend_override_value)
     )
 }
 
@@ -49,11 +71,10 @@ fn cue_command(
     process
 }
 
-fn terraform_export_command(
+fn cue_export_file_command(
     cue_bin: &Path,
     workspace: &Workspace,
-    env: &Env,
-    backend_override_value: &str,
+    expression: &str,
     output_file: &Path,
 ) -> Result<Command> {
     let mut process = Command::new(cue_bin);
@@ -62,7 +83,7 @@ fn terraform_export_command(
         .arg("export")
         .arg(format!(".:{}", workspace.module_package()))
         .arg("-e")
-        .arg(export_expression(workspace, env, backend_override_value))
+        .arg(expression)
         .arg("-f")
         .arg("-o")
         .arg(
@@ -74,6 +95,21 @@ fn terraform_export_command(
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
     Ok(process)
+}
+
+fn terraform_export_command(
+    cue_bin: &Path,
+    workspace: &Workspace,
+    env: &Env,
+    backend_override_value: &str,
+    output_file: &Path,
+) -> Result<Command> {
+    cue_export_file_command(
+        cue_bin,
+        workspace,
+        &export_expression(workspace, env, backend_override_value),
+        output_file,
+    )
 }
 
 fn terraform_command(tf_bin: &Path, output_dir: &Path, args: &[String]) -> Command {
@@ -173,22 +209,8 @@ pub fn run_tf(
     backend_override_value: &str,
     args: &[String],
 ) -> Result<ExitStatus> {
-    let output_dir = workspace.target_dir().join(OUTPUT_FOLDER_NAME).join(env);
-    std::fs::create_dir_all(&output_dir)
-        .into_diagnostic()
-        .map_err(|error| miette::miette!("Failed to create output directory: {error}"))?;
-    let output_file = output_dir.join(OUTPUT_FILE_NAME);
-
-    let export_status = run_command(
-        logger,
-        &mut terraform_export_command(
-            cue_bin,
-            workspace,
-            env,
-            backend_override_value,
-            &output_file,
-        )?,
-    )?;
+    let (export_status, output_dir) =
+        export_terraform(logger, workspace, env, cue_bin, backend_override_value)?;
     if !export_status.success() {
         return Ok(export_status);
     }
@@ -207,6 +229,128 @@ pub fn run_tf(
     }
 
     run_command(logger, &mut terraform_command(tf_bin, &output_dir, args))
+}
+
+pub fn export_terraform(
+    logger: &Logger,
+    workspace: &Workspace,
+    env: &Env,
+    cue_bin: &Path,
+    backend_override_value: &str,
+) -> Result<(ExitStatus, PathBuf)> {
+    let output_dir = workspace.target_dir().join(OUTPUT_FOLDER_NAME).join(env);
+    std::fs::create_dir_all(&output_dir)
+        .into_diagnostic()
+        .map_err(|error| miette::miette!("Failed to create output directory: {error}"))?;
+    ensure_no_tfmigrate_override(&output_dir)?;
+    let output_file = output_dir.join(OUTPUT_FILE_NAME);
+
+    let status = run_command(
+        logger,
+        &mut terraform_export_command(
+            cue_bin,
+            workspace,
+            env,
+            backend_override_value,
+            &output_file,
+        )?,
+    )?;
+    Ok((status, output_dir))
+}
+
+pub fn read_tfmigrate_metadata(
+    workspace: &Workspace,
+    env: &Env,
+    cue_bin: &Path,
+    backend_override_value: &str,
+) -> Result<serde_json::Value> {
+    let mut command = Command::new(cue_bin);
+    command
+        .current_dir(workspace.target_dir())
+        .arg("export")
+        .arg(format!(".:{}", workspace.module_package()))
+        .arg("-e")
+        .arg(migration_expression(workspace, env, backend_override_value))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = command.output().into_diagnostic()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(miette::miette!(
+            "Failed to evaluate tfmigrate history: {}",
+            stderr.trim()
+        ));
+    }
+
+    serde_json::from_slice(&output.stdout)
+        .into_diagnostic()
+        .map_err(|error| miette::miette!("Failed to decode tfmigrate history: {error}"))
+}
+
+pub fn export_historical_backend(
+    logger: &Logger,
+    workspace: &Workspace,
+    module: &str,
+    env: &Env,
+    cue_bin: &Path,
+    backend_override_value: &str,
+    output_dir: &Path,
+) -> Result<ExitStatus> {
+    std::fs::create_dir_all(output_dir)
+        .into_diagnostic()
+        .map_err(|error| miette::miette!("Failed to create migration directory: {error}"))?;
+    ensure_no_tfmigrate_override(output_dir)?;
+    let output_file = output_dir.join(OUTPUT_FILE_NAME);
+    run_command(
+        logger,
+        &mut cue_export_file_command(
+            cue_bin,
+            workspace,
+            &backend_expression(module, env, backend_override_value),
+            &output_file,
+        )?,
+    )
+}
+
+pub fn run_tfmigrate(
+    logger: &Logger,
+    tfmigrate_bin: &Path,
+    tf_bin: &Path,
+    operation: &str,
+    args: &[String],
+    output_dir: &Path,
+    migration: &serde_json::Value,
+) -> Result<ExitStatus> {
+    let contents = serde_json::to_vec_pretty(&migration).into_diagnostic()?;
+    let migration_file = output_dir.join(TFMIGRATE_FILE_NAME);
+    std::fs::write(&migration_file, contents).into_diagnostic()?;
+    let tf_command = shell_words::join([tf_bin
+        .to_str()
+        .ok_or_else(|| miette::miette!("Terraform binary path must be valid UTF-8"))?]);
+    let mut command = Command::new(tfmigrate_bin);
+    command
+        .current_dir(output_dir)
+        .arg(operation)
+        .args(args)
+        .arg(TFMIGRATE_FILE_NAME)
+        .env("TFMIGRATE_EXEC_PATH", tf_command)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+
+    run_command(logger, &mut command)
+}
+
+fn ensure_no_tfmigrate_override(output_dir: &Path) -> Result<()> {
+    let migration_override = output_dir.join(TFMIGRATE_OVERRIDE_FILE);
+    if migration_override.exists() {
+        return Err(miette::miette!(
+            "Found stale tfmigrate backend override at '{}'; remove it and run `tofu init -reconfigure` for this environment before continuing",
+            migration_override.display()
+        ));
+    }
+    Ok(())
 }
 
 fn run_command(logger: &Logger, command: &mut Command) -> Result<ExitStatus> {
@@ -233,7 +377,9 @@ pub fn resolve_tool(path: &Path) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{OUTPUT_FOLDER_NAME, TERRAFORM_INIT_STATE_FILE, cue_command, run_tf};
+    use super::{
+        OUTPUT_FOLDER_NAME, TERRAFORM_INIT_STATE_FILE, cue_command, run_tf, run_tfmigrate,
+    };
     use crate::cli::{CueCommand, ModuleTarget};
     use crate::logger::Logger;
     use crate::test_support::TestDirectory;
@@ -293,6 +439,68 @@ mod tests {
             ]
             .map(OsStr::new)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_tfmigrate_receives_multi_state_migration() -> Result<()> {
+        let temp = TestDirectory::new()?;
+        let tfmigrate_bin = temp.path().join("tfmigrate");
+        let marker = temp.path().join("migration.json");
+        let invocation = temp.path().join("invocation");
+        write_executable(
+            &tfmigrate_bin,
+            &format!(
+                r#"#!/usr/bin/env bash
+# Fake tfmigrate records its inputs for inspection.
+set -euo pipefail
+printf '%s\n%s\n%s\n' "$*" "$TFMIGRATE_EXEC_PATH" "$PWD" > '{}'
+cp "$3" '{}'
+"#,
+                invocation.display(),
+                marker.display()
+            ),
+        )?;
+        let output_dir = temp.path().join("module-b/.cuet/prod");
+        fs::create_dir_all(&output_dir).into_diagnostic()?;
+        let migration = serde_json::json!({
+            "migration": {
+                "multi_state": {
+                    "cuet": {
+                        "from_dir": "/module-a/.cuet/prod",
+                        "to_dir": ".",
+                        "actions": ["mv terraform_data.old terraform_data.new"],
+                    }
+                }
+            }
+        });
+
+        let status = run_tfmigrate(
+            &Logger::new(false),
+            &tfmigrate_bin,
+            Path::new("/tools/tofu"),
+            "plan",
+            &["--out=migration.tfplan".to_owned()],
+            &output_dir,
+            &migration,
+        )?;
+
+        assert!(status.success());
+        assert_eq!(
+            fs::read_to_string(invocation).into_diagnostic()?,
+            format!(
+                "plan --out=migration.tfplan tfmigrate.json\n/tools/tofu\n{}\n",
+                output_dir.display()
+            )
+        );
+        let written_migration: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(marker).into_diagnostic()?)
+                .into_diagnostic()?;
+        assert_eq!(
+            written_migration["migration"]["multi_state"]["cuet"]["actions"][0],
+            "mv terraform_data.old terraform_data.new"
+        );
+        assert!(output_dir.join("tfmigrate.json").is_file());
         Ok(())
     }
 
