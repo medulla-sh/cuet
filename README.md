@@ -28,21 +28,26 @@ brew tap medulla-sh/tap
 brew install cuet
 ```
 
-Install dependencies:
+Install the required development tools from the repository `Brewfile`:
 
 ```bash
-brew install cue-lang/tap/cue opentofu
+brew bundle
 ```
+
+Alternatively, install `just`, CUE, tfmigrate, and OpenTofu with another package
+manager and ensure they are available on `PATH`.
 
 <details>
 <summary>Using your own CUE or Terraform/OpenTofu binaries</summary>
 
-`cuet` expects `cue` and `tofu` to be available on `PATH`, but does not install
-or vendor them. Manage those tools with Homebrew, Nix, mise, asdf, manual
-downloads, or your team's existing toolchain.
+`cuet` expects `cue` and `tofu` to be available on `PATH`, and migration commands
+also require `tfmigrate`. The CLI does not install or vendor these tools. Manage
+them with Homebrew, Nix, mise, asdf, manual downloads, or your team's existing
+toolchain.
 
 Use `--cue-path` or `--tf-path` to point at alternate binaries, including
-Terraform instead of OpenTofu.
+Terraform instead of OpenTofu. Use `--tfmigrate-path` to select an alternate
+`tfmigrate` binary.
 
 </details>
 
@@ -54,6 +59,7 @@ Start here for guides and examples:
 - [`cuet/docs/public/SUMMARY.md`](docs/public/SUMMARY.md)
 - [`cuet/docs/public/module-model.md`](docs/public/module-model.md)
 - [`cuet/docs/public/module-variables.md`](docs/public/module-variables.md)
+- [`cuet/docs/public/moving-resources.md`](docs/public/moving-resources.md)
 
 ## Quick example
 
