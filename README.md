@@ -28,6 +28,24 @@ brew tap medulla-sh/tap
 brew install cuet
 ```
 
+Homebrew installs completions for Bash, Fish, and Zsh. For other installation
+methods, generate completions for your shell with:
+
+```
+cuet completions <bash|elvish|fish|powershell|zsh>
+```
+
+For example, load completions for the current Bash session with:
+
+```bash
+source <(cuet completions bash)
+```
+
+Target completion discovers modules from the current cuet workspace. Selecting
+a module ending in `:` then evaluates that module with CUE and completes its
+populated environments. Completion discovery failures are ignored, so normal
+shell completion remains usable outside a workspace.
+
 Install the required development tools from the repository `Brewfile`:
 
 ```bash

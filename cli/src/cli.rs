@@ -1,4 +1,5 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueHint};
+use clap_complete::engine::ArgValueCompleter;
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -11,23 +12,33 @@ pub struct Cli {
     pub verbose: bool,
 
     /// Module and optional environment to target. Defaults to the current module.
-    #[arg(short = 't', long, value_name = "MODULE[:ENV]")]
+    #[arg(
+        short = 't',
+        long,
+        value_name = "MODULE[:ENV]",
+        add = ArgValueCompleter::new(crate::completions::target_candidates)
+    )]
     pub target: Option<Target>,
 
     /// Exact cuet workspace root. Defaults to discovery from the current directory.
-    #[arg(short = 'w', long, value_name = "PATH")]
+    #[arg(
+        short = 'w',
+        long,
+        value_name = "PATH",
+        value_hint = ValueHint::DirPath
+    )]
     pub workspace: Option<PathBuf>,
 
     /// Path to the 'cue' binary
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::ExecutablePath)]
     pub cue_path: Option<PathBuf>,
 
     /// Path to the 'tofu' (or terraform) binary
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::ExecutablePath)]
     pub tf_path: Option<PathBuf>,
 
     /// Path to the 'tfmigrate' binary
-    #[arg(long)]
+    #[arg(long, value_hint = ValueHint::ExecutablePath)]
     pub tfmigrate_path: Option<PathBuf>,
 
     /// If set, will override to use a local backend instead of the framework configured backend.
@@ -99,6 +110,12 @@ pub fn parse_env(value: &str) -> Result<Env, String> {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
+    /// Generate shell completions
+    Completions {
+        /// Shell to generate completions for
+        shell: clap_complete::Shell,
+    },
+
     /// Manage modules in the cuet workspace
     Modules {
         #[command(subcommand)]
@@ -189,6 +206,7 @@ mod tests {
     };
     use clap::Parser;
     use clap::error::ErrorKind;
+    use clap_complete::Shell;
     use std::path::PathBuf;
 
     #[test]
@@ -304,6 +322,23 @@ mod tests {
                 command: ModulesCommand::Check
             }
         ));
+    }
+
+    #[test]
+    fn test_cli_parses_completion_shell() {
+        let cli = Cli::try_parse_from(["cuet", "completions", "bash"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Commands::Completions { shell: Shell::Bash }
+        ));
+    }
+
+    #[test]
+    fn test_cli_rejects_unknown_completion_shell() {
+        let error = Cli::try_parse_from(["cuet", "completions", "unknown"]).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::InvalidValue);
     }
 
     #[test]

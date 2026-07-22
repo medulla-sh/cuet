@@ -1,4 +1,5 @@
 use crate::cli::{Cli, Commands, Env, ModuleTarget, ModulesCommand, TfmigrateCommand, parse_env};
+use crate::completions;
 use crate::environment;
 use crate::execution::{
     check_cue_export, export_historical_backend, export_terraform, read_tfmigrate_metadata,
@@ -51,6 +52,11 @@ fn run_from(
         use_local_backend,
         command,
     } = cli;
+
+    if let Commands::Completions { shell } = command {
+        completions::write_registration(shell, output)?;
+        return Ok(None);
+    }
 
     if let Commands::Modules { command } = command {
         let root = resolve_root(current_dir, workspace_root.as_deref())?;
@@ -164,6 +170,9 @@ fn run_target_command(
         }
         Commands::Modules { .. } => {
             unreachable!("modules command handled before tool resolution")
+        }
+        Commands::Completions { .. } => {
+            unreachable!("completions command handled before tool resolution")
         }
     }
 }

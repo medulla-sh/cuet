@@ -5,6 +5,7 @@ use miette::Result;
 mod logger;
 mod app;
 mod cli;
+mod completions;
 mod environment;
 mod execution;
 #[cfg(test)]
@@ -12,6 +13,8 @@ mod test_support;
 mod workspace;
 
 fn main() -> Result<()> {
+    completions::complete();
+
     if let Some(status) = app::run(cli::Cli::parse())?
         && !status.success()
     {
