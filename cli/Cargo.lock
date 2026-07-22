@@ -196,6 +196,7 @@ dependencies = [
  "inquire",
  "miette",
  "owo-colors",
+ "serde",
  "serde_json",
  "shell-words",
  "which",

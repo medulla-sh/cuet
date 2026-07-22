@@ -26,6 +26,10 @@ pub struct Cli {
     #[arg(long)]
     pub tf_path: Option<PathBuf>,
 
+    /// Path to the 'tfmigrate' binary
+    #[arg(long)]
+    pub tfmigrate_path: Option<PathBuf>,
+
     /// If set, will override to use a local backend instead of the framework configured backend.
     /// This is useful when creating a backend for the first time.
     #[arg(long, default_value_t = false)]
@@ -110,6 +114,35 @@ pub enum Commands {
         #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
         args: Vec<String>,
     },
+
+    /// Run tfmigrate for the selected module environment
+    Tfmigrate {
+        #[command(subcommand)]
+        command: TfmigrateCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TfmigrateCommand {
+    /// Validate a migration without updating remote state
+    Plan {
+        #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
+        args: Vec<String>,
+    },
+    /// Apply a migration to both remote states
+    Apply {
+        #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
+        args: Vec<String>,
+    },
+}
+
+impl TfmigrateCommand {
+    pub fn command_and_args(&self) -> (&'static str, &[String]) {
+        match self {
+            Self::Plan { args } => ("plan", args),
+            Self::Apply { args } => ("apply", args),
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -151,7 +184,9 @@ impl CueCommand {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Commands, CueCommand, ModuleTarget, ModulesCommand, Target};
+    use super::{
+        Cli, Commands, CueCommand, ModuleTarget, ModulesCommand, Target, TfmigrateCommand,
+    };
     use clap::Parser;
     use clap::error::ErrorKind;
     use std::path::PathBuf;
@@ -269,6 +304,34 @@ mod tests {
                 command: ModulesCommand::Check
             }
         ));
+    }
+
+    #[test]
+    fn test_cli_parses_tfmigrate_arguments() {
+        let cli = Cli::try_parse_from([
+            "cuet",
+            "-t",
+            "/infra/new:prod",
+            "tfmigrate",
+            "plan",
+            "--out=migration.tfplan",
+        ])
+        .unwrap();
+
+        let Commands::Tfmigrate {
+            command: TfmigrateCommand::Plan { args },
+        } = cli.command
+        else {
+            panic!("expected tfmigrate plan command");
+        };
+        assert_eq!(
+            cli.target,
+            Some(Target {
+                module: ModuleTarget::WorkspaceRelative(PathBuf::from("infra/new")),
+                environment: Some("prod".to_owned()),
+            })
+        );
+        assert_eq!(args, ["--out=migration.tfplan"]);
     }
 
     #[test]
