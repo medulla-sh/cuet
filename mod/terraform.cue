@@ -1,5 +1,17 @@
 package cuet
 
+#TerraformResourceHistoryEntry: string | {
+	module?: string
+	env?:    string
+	name?:   string
+}
+
+#TerraformResourceIdentity: {
+	module: string
+	env:    string
+	name:   string
+}
+
 #TerraformInput: {
 	#module: string
 	#backendConfigs: [string]: [string]: {...}
@@ -9,9 +21,10 @@ package cuet
 	#provider?:      string
 	#providerAlias?: string
 	#import?:        string
+	#history?: [...string]
 
 	resource?: [string]: [string]: {
-		#history?: [...string]
+		#history?: [...#TerraformResourceHistoryEntry]
 		...
 	}
 
@@ -34,6 +47,13 @@ package cuet
 }
 
 #TerraformOutput: {
+	#crossStateTransitions: [...{
+		resourceType: string
+		from:         #TerraformResourceIdentity
+		to:           #TerraformResourceIdentity
+	}]
+	#crossStateTransitions: _ | *[]
+
 	terraform?: {
 		required_version?: string
 		required_providers?: [string]: {

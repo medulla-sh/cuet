@@ -160,9 +160,32 @@ _#DefaultProviderAlias: ""
 					#backendConfigs: backendConfigs
 					#envName:        e
 					#env:            #Environments[e]
+					resource?: [string]: [string]: {
+						// Keep this separate from #TerraformResourceHistoryEntry so env can be
+						// constrained to the configured environments.
+						#history?: [...(string | {
+							module?: string
+							env?:    #Env
+							name?:   string
+						})]
+					}
 				}
 			}
 		})
+
+		#backends: {
+			for e, _ in #Environments {
+				(e): {
+					terraform: required_version: #Terraform.requiredVersion
+					terraform: backend: [
+						if infraThis.#metadata.localBackendOverride != null {
+							local: path: infraThis.#metadata.localBackendOverride
+						},
+						backendConfigs[e],
+					][0]
+				}
+			}
+		}
 
 		generated: {
 			let metadata = infraThis.#metadata
@@ -185,6 +208,15 @@ _#DefaultProviderAlias: ""
 		out: {
 			for e, _ in infraThis["in"] {
 				(e): (#OutputPolicy & {in: infraThis.generated[e]}).out
+			}
+		}
+
+		#migration: {
+			for e, _ in infraThis["in"] {
+				(e): {
+					moduleHistory: *infraThis["in"][e].#history | []
+					resourceTransitions: infraThis.generated[e].#crossStateTransitions
+				}
 			}
 		}
 	}
@@ -214,9 +246,11 @@ _#GenerateTf: {
 			in: tf
 		}).out
 
-		(_#GenerateMoves & {
+		let generatedMoves = _#GenerateMoves & {
 			in: tf
-		}).out
+		}
+		generatedMoves.out
+		#crossStateTransitions: generatedMoves.crossStateTransitions
 
 		if len(*tf.variable | {}) > 0 {variable: tf.variable}
 		if len(*tf.locals | {}) > 0 {locals: tf.locals}
@@ -224,6 +258,104 @@ _#GenerateTf: {
 		if len(*tf.resource | {}) > 0 {resource: tf.resource}
 		if len(*tf.output | {}) > 0 {output: tf.output}
 	}
+}
+
+_#NormalizeHistoryEntry: {
+	raw: string
+	out: {
+		module: []
+		env: []
+		name: [raw]
+	}
+} | {
+	raw: {
+		module?: string
+		env?:    string
+		name?:   string
+	}
+	out: {
+		module: *[raw.module] | []
+		env: *[raw.env] | []
+		name: *[raw.name] | []
+	}
+}
+
+_#ResolveResourceHistory: {
+	resourceType: _
+	current: {
+		module: _
+		env:    _
+		name:   _
+	}
+	history: [...#TerraformResourceHistoryEntry]
+
+	let normalized = [
+		for raw in history {
+			(_#NormalizeHistoryEntry & {"raw": raw}).out
+		},
+	]
+
+	let resolvedHistory = [
+		for index, _ in normalized {
+			let modules = list.Concat([[current.module],
+				for previousIndex, entry in normalized
+				if previousIndex <= index {
+					entry.module
+				},
+			])
+			let envs = list.Concat([[current.env],
+				for previousIndex, entry in normalized
+				if previousIndex <= index {
+					entry.env
+				},
+			])
+			let names = list.Concat([[current.name],
+				for previousIndex, entry in normalized
+				if previousIndex <= index {
+					entry.name
+				},
+			])
+
+			{
+				module: modules[len(modules)-1]
+				env:    envs[len(envs)-1]
+				name:   names[len(names)-1]
+			}
+		},
+	]
+
+	transitions: [
+		for index, identity in resolvedHistory
+		if index+1 < len(resolvedHistory) {
+			from: identity
+			to:   resolvedHistory[index+1]
+		},
+	]
+
+	if len(resolvedHistory) != 0 {
+		last: resolvedHistory[len(resolvedHistory)-1]
+	}
+
+	sameCurrentStateMoves: [
+		for transition in transitions
+		if transition.from.module == current.module
+		if transition.from.env == current.env
+		if transition.to.module == current.module
+		if transition.to.env == current.env {
+			from: "\(resourceType).\(transition.from.name)"
+			to:   "\(resourceType).\(transition.to.name)"
+		},
+	]
+
+	crossStateTransitions: [
+		for transition in transitions
+		if transition.from.module != transition.to.module ||
+			transition.from.env != transition.to.env {
+			resourceType: resourceType
+			from:         transition.from
+			to:           transition.to
+		},
+	]
 }
 
 _#GenerateProviders: {
@@ -295,17 +427,57 @@ _#GenerateImports: {
 _#GenerateMoves: {
 	in: #TerraformInput
 
-	out: {
-		let moves = [
-			for type, resources in (*in.resource | {})
-			for name, block in resources if block.#history != _|_
-			for index, oldName in block.#history {
-				let names = list.Concat([block.#history, [name]])
-				from: "\(type).\(oldName)"
-				to:   "\(type).\(names[index+1])"
-			},
-		]
+	let histories = [
+		for resourceType, resources in (*in.resource | {})
+		for name, block in resources
+		if block.#history != _|_ {
+			let resolved = _#ResolveResourceHistory & {
+				"resourceType": resourceType
+				"current": {
+					module: in.#module
+					env:    in.#envName
+					name:   name
+				}
+				"history": block.#history
+			}
 
+			sameCurrentStateMoves: list.Concat([resolved.sameCurrentStateMoves, [
+				if len(block.#history) != 0
+				if resolved.last.module == in.#module
+				if resolved.last.env == in.#envName {
+					from: "\(resourceType).\(resolved.last.name)"
+					to:   "\(resourceType).\(name)"
+				},
+			]])
+
+			crossStateTransitions: list.Concat([resolved.crossStateTransitions, [
+				if len(block.#history) != 0
+				if resolved.last.module != in.#module || resolved.last.env != in.#envName {
+					resourceType: resourceType
+					from:         resolved.last
+					to: {
+						module: in.#module
+						env:    in.#envName
+						name:   name
+					}
+				},
+			]])
+		},
+	]
+
+	let moves = list.Concat([
+		for history in histories {
+			history.sameCurrentStateMoves
+		},
+	])
+
+	crossStateTransitions: list.Concat([
+		for history in histories {
+			history.crossStateTransitions
+		},
+	])
+
+	out: {
 		if len(moves) != 0 {
 			moved: moves
 		}
