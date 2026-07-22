@@ -20,10 +20,22 @@ infra: {
 		module:               "test/module"
 		localBackendOverride: null
 	}
-	in: dev: {}
+	in: dev: resource: terraform_data: current: {
+		#history: ["original", "renamed"]
+		input: "value"
+	}
 }
 
 infra: {
-	generated: close({dev: _})
+	generated: close({dev: {
+		moved: [{
+			from: "terraform_data.original"
+			to:   "terraform_data.renamed"
+		}, {
+			from: "terraform_data.renamed"
+			to:   "terraform_data.current"
+		}]
+		...
+	}})
 	out: close({dev: _})
 }

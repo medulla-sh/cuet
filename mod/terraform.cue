@@ -10,7 +10,10 @@ package cuet
 	#providerAlias?: string
 	#import?:        string
 
-	resource?: [string]: [string]: _
+	resource?: [string]: [string]: {
+		#history?: [...string]
+		...
+	}
 
 	data?: [string]: [string]: _
 
@@ -64,5 +67,10 @@ package cuet
 	import?: [...{
 		to: string
 		id: string
+	}]
+
+	moved?: [...{
+		from: string
+		to:   string
 	}]
 }

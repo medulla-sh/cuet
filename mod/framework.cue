@@ -1,6 +1,7 @@
 package cuet
 
 import (
+	"list"
 	"strings"
 )
 
@@ -213,6 +214,10 @@ _#GenerateTf: {
 			in: tf
 		}).out
 
+		(_#GenerateMoves & {
+			in: tf
+		}).out
+
 		if len(*tf.variable | {}) > 0 {variable: tf.variable}
 		if len(*tf.locals | {}) > 0 {locals: tf.locals}
 		if len(*tf.data | {}) > 0 {data: tf.data}
@@ -283,6 +288,26 @@ _#GenerateImports: {
 
 		if len(imports) != 0 {
 			import: imports
+		}
+	}
+}
+
+_#GenerateMoves: {
+	in: #TerraformInput
+
+	out: {
+		let moves = [
+			for type, resources in (*in.resource | {})
+			for name, block in resources if block.#history != _|_
+			for index, oldName in block.#history {
+				let names = list.Concat([block.#history, [name]])
+				from: "\(type).\(oldName)"
+				to:   "\(type).\(names[index+1])"
+			},
+		]
+
+		if len(moves) != 0 {
+			moved: moves
 		}
 	}
 }
