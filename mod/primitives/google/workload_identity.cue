@@ -1,0 +1,151 @@
+package google
+
+import T "github.com/medulla-sh/cuet"
+
+#DeletionPolicy: "ABANDON" | "DELETE" | "PREVENT"
+
+#WorkloadIdentityPool: {
+	in: {
+		// Adopts an existing pool using a supported Google Cloud import identifier.
+		#import?: string
+
+		// Used as both the pool ID and Terraform resource key.
+		name: =~"^[a-z0-9-]{4,32}$" & !~"^gcp-"
+
+		// Displayed in the Google Cloud console.
+		displayName: string
+		displayName: _ | *name
+
+		// Explains which external workloads the pool admits.
+		description?: string
+
+		project: {
+			// Selects the Terraform data-source key.
+			name: string
+
+			// Selects a specific Google Cloud project when it differs from the key.
+			id?: string
+		}
+
+		// Prevents new token exchanges while preserving the pool configuration.
+		disabled: bool
+		disabled: _ | *false
+
+		// Controls what happens when Terraform removes the resource.
+		deletionPolicy: #DeletionPolicy
+		deletionPolicy: _ | *"PREVENT"
+	}
+
+	ref: "google_iam_workload_identity_pool.\(in.name)"
+
+	out: T.#TerraformInput & {
+		data: google_project: (in.project.name): {
+			if in.project.id != _|_ {
+				project_id: in.project.id
+			}
+		}
+
+		resource: google_iam_workload_identity_pool: (in.name): {
+			if in.#import != _|_ {
+				#import: in.#import
+			}
+
+			project:                   "${data.google_project.\(in.project.name).project_id}"
+			workload_identity_pool_id: in.name
+			display_name:              in.displayName
+			disabled:                  in.disabled
+			deletion_policy:           in.deletionPolicy
+
+			if in.description != _|_ {
+				description: in.description
+			}
+		}
+	}
+}
+
+#OidcWorkloadIdentityProvider: {
+	in: {
+		// Adopts an existing provider using a supported Google Cloud import identifier.
+		#import?: string
+
+		// Used as both the provider ID and Terraform resource key.
+		name: =~"^[a-z0-9-]{4,32}$" & !~"^gcp-"
+
+		// Displayed in the Google Cloud console.
+		displayName: string
+		displayName: _ | *name
+
+		// Explains which external issuer and workload the provider trusts.
+		description?: string
+
+		project: {
+			// Selects the Terraform data-source key.
+			name: string
+
+			// Selects a specific Google Cloud project when it differs from the key.
+			id?: string
+		}
+
+		// References the containing pool ID or a Terraform expression that resolves to it.
+		poolId: string & !=""
+
+		// Maps OIDC claims into Google Cloud subject and custom attributes.
+		attributeMapping: {
+			"google.subject": string & !=""
+			[string]:         string & !=""
+		}
+
+		// Rejects tokens that do not satisfy the Common Expression Language predicate.
+		attributeCondition: string & !=""
+
+		// Identifies the OpenID Connect issuer.
+		issuerUri: =~"^https://.+"
+
+		// Restricts accepted token audiences when the issuer default is insufficient.
+		allowedAudiences: [...string]
+
+		// Prevents new token exchanges while preserving the provider configuration.
+		disabled: bool
+		disabled: _ | *false
+
+		// Controls what happens when Terraform removes the resource.
+		deletionPolicy: #DeletionPolicy
+		deletionPolicy: _ | *"PREVENT"
+	}
+
+	ref: "google_iam_workload_identity_pool_provider.\(in.name)"
+
+	out: T.#TerraformInput & {
+		data: google_project: (in.project.name): {
+			if in.project.id != _|_ {
+				project_id: in.project.id
+			}
+		}
+
+		resource: google_iam_workload_identity_pool_provider: (in.name): {
+			if in.#import != _|_ {
+				#import: in.#import
+			}
+
+			project:                            "${data.google_project.\(in.project.name).project_id}"
+			workload_identity_pool_id:          in.poolId
+			workload_identity_pool_provider_id: in.name
+			display_name:                       in.displayName
+			attribute_mapping:                  in.attributeMapping
+			attribute_condition:                in.attributeCondition
+			disabled:                           in.disabled
+			deletion_policy:                    in.deletionPolicy
+
+			if in.description != _|_ {
+				description: in.description
+			}
+
+			oidc: {
+				issuer_uri: in.issuerUri
+				if len(in.allowedAudiences) > 0 {
+					allowed_audiences: in.allowedAudiences
+				}
+			}
+		}
+	}
+}

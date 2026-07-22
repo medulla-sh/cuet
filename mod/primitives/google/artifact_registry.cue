@@ -32,6 +32,13 @@ import (
 
 		description?: string
 
+		iam: [string]: {
+			#import?: string
+
+			role:   string
+			member: string
+		}
+
 		*{} | {
 			format: "DOCKER"
 			dockerConfig?: {
@@ -59,6 +66,21 @@ import (
 				docker_config: {
 					immutable_tags: in.dockerConfig.immutableTags
 				}
+			}
+		}
+
+		for bindingName, binding in in.iam {
+			let resourceName = "\(in.name)-\(bindingName)"
+			resource: google_artifact_registry_repository_iam_member: (resourceName): {
+				if binding.#import != _|_ {
+					#import: binding.#import
+				}
+
+				project:    "${\(ref).project}"
+				location:   "${\(ref).location}"
+				repository: "${\(ref).repository_id}"
+				role:       binding.role
+				member:     binding.member
 			}
 		}
 	}
