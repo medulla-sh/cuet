@@ -4,6 +4,34 @@ import T "github.com/medulla-sh/cuet"
 
 #DeletionPolicy: "ABANDON" | "DELETE" | "PREVENT"
 
+#WorkloadIdentityPrincipalSet: {
+	in: {
+		// Full workload identity pool resource name, including project and location.
+		poolName: string & !=""
+
+		({
+			attribute: {
+				name:  =~"^[a-z0-9_]{1,100}$"
+				value: string & !=""
+			}
+		} | {
+			group: string & !=""
+		} | {
+			all: true
+		})
+	}
+
+	if in.attribute != _|_ {
+		val: "principalSet://iam.googleapis.com/\(in.poolName)/attribute.\(in.attribute.name)/\(in.attribute.value)"
+	}
+	if in.group != _|_ {
+		val: "principalSet://iam.googleapis.com/\(in.poolName)/group/\(in.group)"
+	}
+	if in.all != _|_ {
+		val: "principalSet://iam.googleapis.com/\(in.poolName)/*"
+	}
+}
+
 #WorkloadIdentityPool: {
 	in: {
 		// Adopts an existing pool using a supported Google Cloud import identifier.
