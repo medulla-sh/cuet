@@ -47,10 +47,12 @@ For example, load completions for the current Bash session with:
 source <(cuet completions bash)
 ```
 
-Target completion discovers modules from the current cuet workspace. Selecting
-a module ending in `:` then evaluates that module with CUE and completes its
-populated environments. Completion discovery failures are ignored, so normal
-shell completion remains usable outside a workspace.
+Target completion discovers modules from the current cuet workspace. In Zsh,
+selecting a module adds a temporary `:`: continue typing to complete its
+populated environments, or type a space to remove the `:`. Other shells complete
+the bare module; type `:` before requesting environment completion. Discovery
+failures are ignored, so normal shell completion remains usable outside a
+workspace.
 
 Install the required development tools from the repository `Brewfile`:
 

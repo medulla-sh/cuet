@@ -1,13 +1,17 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
 struct TestDirectory(PathBuf);
 
 impl TestDirectory {
     fn new() -> Self {
+        let id = NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed);
         let path =
-            std::env::temp_dir().join(format!("cuet-completion-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("cuet-completion-test-{}-{id}", std::process::id()));
         fs::create_dir(&path).unwrap();
         Self(path)
     }
@@ -55,7 +59,42 @@ fn test_dynamic_completion_suggests_workspace_modules() {
         .unwrap();
 
     assert!(output.status.success());
-    assert_eq!(String::from_utf8(output.stdout).unwrap(), "/infra/neon:");
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "/infra/neon");
+}
+
+#[test]
+fn test_zsh_registration_uses_removable_module_suffix() {
+    let output = Command::new(env!("CARGO_BIN_EXE_cuet"))
+        .args(["completions", "zsh"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let registration = String::from_utf8(output.stdout).unwrap();
+    assert!(registration.contains("_describe -V 'modules' modules -S ':' -r ' '"));
+}
+
+#[test]
+fn test_zsh_dynamic_completion_marks_workspace_modules() {
+    let temp = TestDirectory::new();
+    fs::write(temp.path().join(".cuetroot.cue"), "").unwrap();
+    let module = temp.path().join("infra/neon");
+    fs::create_dir_all(&module).unwrap();
+    fs::write(module.join("cuet.cue"), "").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cuet"))
+        .current_dir(temp.path())
+        .env("COMPLETE", "zsh")
+        .env("_CLAP_COMPLETE_INDEX", "2")
+        .args(["--", "cuet", "-t", ""])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "__cuet_target_module__\t/infra/neon"
+    );
 }
 
 #[test]

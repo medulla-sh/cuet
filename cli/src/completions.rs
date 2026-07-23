@@ -4,15 +4,22 @@ use crate::workspace::{Workspace, discover_modules, resolve_root};
 use clap::CommandFactory;
 use clap_complete::CompleteEnv;
 use clap_complete::Shell;
-use clap_complete::engine::CompletionCandidate;
+use clap_complete::engine::{CompletionCandidate, complete as complete_args};
+use clap_complete::env::{Bash, Elvish, EnvCompleter, Fish, Powershell, Shells};
 use miette::{IntoDiagnostic, Result};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+const MODULE_TAG: &str = "cuet-target-module";
+const MODULE_MARKER: &str = "__cuet_target_module__";
+
 pub fn complete() {
-    CompleteEnv::with_factory(Cli::command).complete();
+    let shells: [&dyn EnvCompleter; 5] = [&Bash, &Elvish, &Fish, &Powershell, &CuetZsh];
+    CompleteEnv::with_factory(Cli::command)
+        .shells(Shells(&shells))
+        .complete();
 }
 
 pub fn write_registration(shell: Shell, output: &mut impl Write) -> Result<()> {
@@ -40,10 +47,18 @@ pub fn target_candidates(current: &OsStr) -> Vec<CompletionCandidate> {
         return Vec::new();
     };
 
+    let completing_module = !current.contains(':');
     target_values(current, &current_dir, Path::new("cue"))
         .unwrap_or_default()
         .into_iter()
-        .map(CompletionCandidate::new)
+        .map(|value| {
+            let candidate = CompletionCandidate::new(value);
+            if completing_module {
+                candidate.tag(Some(MODULE_TAG.into()))
+            } else {
+                candidate
+            }
+        })
         .collect()
 }
 
@@ -54,9 +69,9 @@ fn target_values(current: &str, current_dir: &Path, cue_bin: &Path) -> Result<Ve
             .into_iter()
             .map(|module| {
                 if module == "." {
-                    ":".to_owned()
+                    ".".to_owned()
                 } else {
-                    format!("/{module}:")
+                    format!("/{module}")
                 }
             })
             .filter(|candidate| module_candidate_matches(candidate, current))
@@ -78,6 +93,144 @@ fn target_values(current: &str, current_dir: &Path, cue_bin: &Path) -> Result<Ve
         .collect();
     environments.sort();
     Ok(environments)
+}
+
+// clap_complete cannot represent a removable suffix, so preserve module tags in
+// the Zsh protocol and let Zsh insert `:` separately from the candidate value.
+struct CuetZsh;
+
+impl EnvCompleter for CuetZsh {
+    fn name(&self) -> &'static str {
+        "zsh"
+    }
+
+    fn is(&self, name: &str) -> bool {
+        name == "zsh"
+    }
+
+    fn write_registration(
+        &self,
+        var: &str,
+        name: &str,
+        bin: &str,
+        completer: &str,
+        output: &mut dyn Write,
+    ) -> std::io::Result<()> {
+        let name = name.replace('-', "_");
+        let bin = shell_quote(bin);
+        let completer = shell_quote(completer);
+        let script = r#"#compdef BIN
+function _clap_dynamic_completer_NAME() {
+    local _CLAP_COMPLETE_INDEX=$(expr $CURRENT - 1)
+    local _CLAP_IFS=$'\n'
+
+    local completions=("${(@f)$( \
+        _CLAP_IFS="$_CLAP_IFS" \
+        _CLAP_COMPLETE_INDEX="$_CLAP_COMPLETE_INDEX" \
+        VAR="zsh" \
+        COMPLETER -- "${words[@]}" 2>/dev/null \
+    )}")
+
+    if [[ -n $completions ]]; then
+        local -a dirs=()
+        local -a modules=()
+        local -a other=()
+        local completion
+        for completion in $completions; do
+            if [[ "$completion" == MODULE_MARKER$'\t'* ]]; then
+                modules+=("${completion#*$'\t'}")
+                continue
+            fi
+
+            local value="${completion%%:*}"
+            if [[ "$value" == */ ]]; then
+                local dir_no_slash="${value%/}"
+                if [[ "$completion" == *:* ]]; then
+                    local desc="${completion#*:}"
+                    dirs+=("$dir_no_slash:$desc")
+                else
+                    dirs+=("$dir_no_slash")
+                fi
+            else
+                other+=("$completion")
+            fi
+        done
+        [[ -n $dirs ]] && _describe -V 'values' dirs -S '/' -r '/'
+        [[ -n $modules ]] && _describe -V 'modules' modules -S ':' -r ' '
+        [[ -n $other ]] && _describe -V 'values' other
+    fi
+}
+
+compdef _clap_dynamic_completer_NAME BIN"#
+            .replace("MODULE_MARKER", MODULE_MARKER)
+            .replace("NAME", &name)
+            .replace("COMPLETER", &completer)
+            .replace("BIN", &bin)
+            .replace("VAR", var);
+
+        writeln!(output, "{script}")
+    }
+
+    fn write_complete(
+        &self,
+        command: &mut clap::Command,
+        mut args: Vec<OsString>,
+        current_dir: Option<&Path>,
+        output: &mut dyn Write,
+    ) -> std::io::Result<()> {
+        let index = std::env::var("_CLAP_COMPLETE_INDEX")
+            .ok()
+            .and_then(|index| index.parse().ok())
+            .unwrap_or_default();
+        let separator = std::env::var("_CLAP_IFS").unwrap_or_else(|_| "\n".to_owned());
+        if args.len() == index {
+            args.push(OsString::new());
+        }
+
+        let candidates = complete_args(command, args, index, current_dir)?;
+        for (index, candidate) in candidates.iter().enumerate() {
+            if index != 0 {
+                write!(output, "{separator}")?;
+            }
+            if candidate
+                .get_tag()
+                .is_some_and(|tag| tag.to_string() == MODULE_TAG)
+            {
+                write!(
+                    output,
+                    "{MODULE_MARKER}\t{}",
+                    candidate.get_value().to_string_lossy()
+                )?;
+                continue;
+            }
+
+            write!(
+                output,
+                "{}",
+                escape_zsh_value(&candidate.get_value().to_string_lossy())
+            )?;
+            if let Some(help) = candidate.get_help() {
+                write!(
+                    output,
+                    ":{}",
+                    help.to_string()
+                        .lines()
+                        .next()
+                        .unwrap_or_default()
+                        .replace('\\', "\\\\")
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn escape_zsh_value(value: &str) -> String {
+    value.replace('\\', "\\\\").replace(':', "\\:")
 }
 
 fn module_candidate_matches(candidate: &str, current: &str) -> bool {
@@ -111,10 +264,10 @@ mod tests {
 
         let values = target_values("", &root, &temp.path().join("missing-cue"))?;
 
-        assert_eq!(values, [":", "/infra/neon:", "/services/api:"]);
+        assert_eq!(values, [".", "/infra/neon", "/services/api"]);
         assert_eq!(
             target_values("infra/n", &root, &temp.path().join("missing-cue"))?,
-            ["/infra/neon:"]
+            ["/infra/neon"]
         );
         Ok(())
     }
