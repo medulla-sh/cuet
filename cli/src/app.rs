@@ -7,6 +7,7 @@ use crate::execution::{
 };
 use crate::logger::Logger;
 use crate::workspace::{Workspace, discover_modules, resolve_root};
+use clap::CommandFactory;
 use miette::{IntoDiagnostic, Result};
 use serde::Deserialize;
 use std::borrow::Cow;
@@ -52,6 +53,11 @@ fn run_from(
         use_local_backend,
         command,
     } = cli;
+
+    if matches!(&command, Commands::Version) {
+        write!(output, "{}", Cli::command().render_version()).into_diagnostic()?;
+        return Ok(None);
+    }
 
     if let Commands::Completions { shell } = command {
         completions::write_registration(shell, output)?;
@@ -173,6 +179,9 @@ fn run_target_command(
         }
         Commands::Completions { .. } => {
             unreachable!("completions command handled before tool resolution")
+        }
+        Commands::Version => {
+            unreachable!("version command handled before tool resolution")
         }
     }
 }
@@ -664,6 +673,30 @@ mod tests {
 
         assert!(status.is_none());
         assert_eq!(output, b".\n");
+        Ok(())
+    }
+
+    #[test]
+    fn test_version_requires_no_workspace_or_tools() -> Result<()> {
+        let cli = Cli {
+            verbose: false,
+            target: None,
+            workspace: Some(PathBuf::from("/missing-workspace")),
+            cue_path: Some(PathBuf::from("/missing-cue")),
+            tf_path: Some(PathBuf::from("/missing-tofu")),
+            tfmigrate_path: Some(PathBuf::from("/missing-tfmigrate")),
+            use_local_backend: false,
+            command: Commands::Version,
+        };
+
+        let mut output = Vec::new();
+        let status = run_from(cli, Path::new("/missing-directory"), &mut output)?;
+
+        assert!(status.is_none());
+        assert_eq!(
+            output,
+            format!("cuet {}\n", env!("CARGO_PKG_VERSION")).as_bytes()
+        );
         Ok(())
     }
 

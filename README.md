@@ -28,6 +28,12 @@ brew tap medulla-sh/tap
 brew install cuet
 ```
 
+Verify the installed version with:
+
+```bash
+cuet --version
+```
+
 Homebrew installs completions for Bash, Fish, and Zsh. For other installation
 methods, generate completions for your shell with:
 

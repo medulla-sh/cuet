@@ -70,9 +70,23 @@ fn test_dynamic_completion_suggests_root_flags() {
     assert!(output.status.success());
     let candidates = String::from_utf8(output.stdout).unwrap();
     assert!(candidates.lines().any(|candidate| candidate == "--target"));
+    assert!(candidates.lines().any(|candidate| candidate == "--version"));
     assert!(
         candidates
             .lines()
             .any(|candidate| candidate == "--workspace")
     );
+}
+
+#[test]
+fn test_dynamic_completion_suggests_version_command() {
+    let output = Command::new(env!("CARGO_BIN_EXE_cuet"))
+        .env("COMPLETE", "bash")
+        .env("_CLAP_COMPLETE_INDEX", "1")
+        .args(["--", "cuet", "ver"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "version");
 }

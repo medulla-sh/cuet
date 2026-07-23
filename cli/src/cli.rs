@@ -6,6 +6,7 @@ use std::str::FromStr;
 #[derive(Parser, Debug)]
 #[command(name = "cuet")]
 #[command(about = "A CLI for interacting with CUE-based Terraform setups")]
+#[command(version)]
 pub struct Cli {
     /// Verbosity
     #[arg(short = 'v', long, global = true)]
@@ -110,6 +111,9 @@ pub fn parse_env(value: &str) -> Result<Env, String> {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
+    /// Print version information
+    Version,
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
@@ -322,6 +326,33 @@ mod tests {
                 command: ModulesCommand::Check
             }
         ));
+    }
+
+    #[test]
+    fn test_cli_parses_version_command() {
+        let cli = Cli::try_parse_from(["cuet", "version"]).unwrap();
+
+        assert!(matches!(cli.command, Commands::Version));
+    }
+
+    #[test]
+    fn test_cli_displays_version_from_flags() {
+        for flag in ["-V", "--version"] {
+            let error = Cli::try_parse_from(["cuet", flag]).unwrap_err();
+
+            assert_eq!(error.kind(), ErrorKind::DisplayVersion);
+            assert_eq!(
+                error.to_string(),
+                format!("cuet {}\n", env!("CARGO_PKG_VERSION"))
+            );
+        }
+    }
+
+    #[test]
+    fn test_cli_preserves_verbose_short_flag() {
+        let cli = Cli::try_parse_from(["cuet", "-v", "modules", "list"]).unwrap();
+
+        assert!(cli.verbose);
     }
 
     #[test]
