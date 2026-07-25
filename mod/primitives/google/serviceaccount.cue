@@ -72,7 +72,9 @@ import T "github.com/medulla-sh/cuet"
 				"role": role
 				member: "serviceAccount:${\(serviceAccountRef).email}"
 
-				project: serviceAccountProject
+				if serviceAccountProject.id != _|_ {
+					"project": serviceAccountProject
+				}
 			}}
 			iamMember.out
 		}
