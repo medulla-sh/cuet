@@ -14,6 +14,7 @@ import (
 		name: _ | *regexp.ReplaceAll("[^[:alnum:]_-]", "\(in.role)-\(in.member)", "-")
 		project: {
 			name: string
+			name: _ | *id
 			id?:  string
 		}
 		role:   string
