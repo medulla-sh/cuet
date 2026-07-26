@@ -778,7 +778,7 @@ if [[ $expression == *'["in"]'* ]]; then
 	esac
 	exit 0
 fi
-if [[ $module == alpha && $expression == *'["prod"]' ]]; then
+if [[ $module == alpha && $expression == *'["prod"]'* ]]; then
 	printf 'first export error\nsecond export error\n' >&2
 	exit 7
 fi

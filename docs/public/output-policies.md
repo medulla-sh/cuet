@@ -45,7 +45,7 @@ If a module does not configure an output policy, `cuet` uses a no-op policy:
 
 1. `infra.generated[env]` is the raw Terraform/OpenTofu output generated from
    `infra.in[env]`.
-1. `infra.out[env]` is the result of applying `#OutputPolicy` to
+1. `infra.out[env].terraform` is the result of applying `#OutputPolicy` to
    `infra.generated[env]`.
 
 Conceptually:
@@ -53,7 +53,7 @@ Conceptually:
 ```cue
 infra: out: {
     for env, _ in #Environments {
-        (env): (#OutputPolicy & {in: infra.generated[env]}).out
+        (env): terraform: (#OutputPolicy & {in: infra.generated[env]}).out
     }
 }
 ```

@@ -54,6 +54,8 @@ import (
 ## Why this works
 
 - `bootstrap` contributes Terraform input (in this case a Google data source).
+- `cuet` infers the Google provider dependency from that data source, even when
+  the module has no other Google resources.
 - The generated provider block can then reference the bootstrapped value.
 - `cuet` still emits normal Terraform JSON, so execution stays in
   `tofu`/`terraform`.
@@ -61,6 +63,8 @@ import (
 ## Tips
 
 - Keep dependency chains shallow and explicit.
+- Provider bootstrap dependencies may not introduce further provider
+  dependencies.
 - Put provider wiring in your shared base infra module, not app modules.
 - Use clear naming for secret IDs across environments (for example, `neon-dev`,
   `neon-staging`, `neon-prod`).

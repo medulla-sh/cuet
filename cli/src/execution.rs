@@ -44,7 +44,7 @@ fn backend_expression(module: &str, env: &Env, backend_override_value: &str) -> 
 fn export_expression(workspace: &Workspace, env: &Env, backend_override_value: &str) -> String {
     let environment = serde_json::Value::String(env.clone());
     format!(
-        "((infra & {}).out)[{environment}]",
+        "((infra & {}).out)[{environment}].terraform",
         metadata_expression(workspace, backend_override_value)
     )
 }
@@ -433,7 +433,7 @@ mod tests {
                 "export",
                 ".:neon",
                 "-e",
-                r#"((infra & { #metadata: { module: "infra/neon", localBackendOverride: null } }).out)["dev"]"#,
+                r#"((infra & { #metadata: { module: "infra/neon", localBackendOverride: null } }).out)["dev"].terraform"#,
                 "--out",
                 "yaml",
             ]

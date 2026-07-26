@@ -1,6 +1,10 @@
 package framework
 
-import cuet "github.com/medulla-sh/cuet@v0"
+import (
+	cuet "github.com/medulla-sh/cuet@v0"
+	G "github.com/medulla-sh/cuet/primitives/google"
+	"github.com/medulla-sh/cuet/primitives/neon"
+)
 
 cuet.#InfraModule
 
@@ -12,7 +16,30 @@ cuet.#InfraModule
 #Terraform: {
 	requiredVersion: ">= 1.0"
 	backend: local: path: "state.tfstate"
-	providers: {}
+	providers: {
+		google: {
+			requiredProvider: {
+				source:  "hashicorp/google"
+				version: ">=6"
+			}
+			default: provider: project: "example"
+		}
+		neon: {
+			requiredProvider: {
+				source:  "kislerdm/neon"
+				version: "~>0.13"
+			}
+			default: {
+				let secret = G.#SecretVersion & {in: {
+					name:     "neon"
+					project:  "example"
+					secretId: "neon"
+				}}
+				bootstrap: secret.out
+				provider: api_key: "${data.google_secret_manager_secret_version.neon.secret_data}"
+			}
+		}
+	}
 }
 
 infra: {
@@ -21,6 +48,17 @@ infra: {
 		localBackendOverride: null
 	}
 	in: dev: {
+		let project = neon.#Project & {"in": {
+			name:     "example"
+			regionId: "aws-us-west-2"
+		}}
+		project.out
+		let branch = neon.#Branch & {"in": {
+			name:      "dev"
+			projectId: project.ref
+		}}
+		branch.out
+
 		resource: terraform_data: {
 			current: {
 				#history: ["original", "renamed"]
@@ -62,7 +100,31 @@ infra: {
 		}
 		prod: _
 	})
-	out: close({dev: _, prod: _})
+	out: close({
+		dev: {
+			terraform: {
+				terraform: required_providers: {
+					google: {
+						source:  "hashicorp/google"
+						version: ">=6"
+					}
+					neon: {
+						source:  "kislerdm/neon"
+						version: "~>0.13"
+					}
+				}
+				provider: google: [{project: "example"}]
+				data: google_secret_manager_secret_version: neon: {
+					project: "example"
+					secret:  "neon"
+				}
+				...
+			}
+			kubernetes: enabled: true
+		}
+		prod: terraform: _
+	})
+	out: dev: kubernetes: enabled: true
 	#migration: dev: {
 		moduleHistory: []
 		resourceTransitions: [{
