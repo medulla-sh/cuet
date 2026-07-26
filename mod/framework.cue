@@ -119,6 +119,8 @@ _#DefaultProviderAlias: ""
 //         }
 //     }
 //
+#EnvironmentOutput: [string]: _
+
 #InfraModule: {
 	// Configuration for environments. This configures what environments are
 	// supported by the module.
@@ -207,7 +209,9 @@ _#DefaultProviderAlias: ""
 
 		out: {
 			for e, _ in infraThis["in"] {
-				(e): (#OutputPolicy & {in: infraThis.generated[e]}).out
+				(e): #EnvironmentOutput & {
+					terraform: (#OutputPolicy & {in: infraThis.generated[e]}).out
+				}
 			}
 		}
 
@@ -221,7 +225,6 @@ _#DefaultProviderAlias: ""
 		}
 	}
 
-	out: infra.out
 }
 
 _#GenerateTf: {
@@ -252,11 +255,57 @@ _#GenerateTf: {
 		generatedMoves.out
 		#crossStateTransitions: generatedMoves.crossStateTransitions
 
-		if len(*tf.variable | {}) > 0 {variable: tf.variable}
-		if len(*tf.locals | {}) > 0 {locals: tf.locals}
-		if len(*tf.data | {}) > 0 {data: tf.data}
-		if len(*tf.resource | {}) > 0 {resource: tf.resource}
-		if len(*tf.output | {}) > 0 {output: tf.output}
+		(_#RenderTerraformInput & {in: tf}).out
+	}
+}
+
+_#RenderTerraformInput: {
+	in: #TerraformInput
+
+	out: {
+		if len(*in.variable | {}) > 0 {variable: in.variable}
+		if len(*in.locals | {}) > 0 {locals: in.locals}
+		if len(*in.output | {}) > 0 {output: in.output}
+
+		if len(*in.data | {}) > 0 {
+			data: {
+				for sourceName, blocks in in.data
+				for blockName, block in blocks {
+					let providerName = [
+						if block.#provider != _|_ {block.#provider},
+						strings.SplitN(sourceName, "_", 2)[0],
+					][0]
+					(sourceName): (blockName): block & {
+						if block.#provider != _|_ || block.#providerAlias != _|_ {
+							"provider": [
+								if block.#providerAlias != _|_ {"\(providerName).\(block.#providerAlias)"},
+								providerName,
+							][0]
+						}
+					}
+				}
+			}
+		}
+
+		if len(*in.resource | {}) > 0 {
+			resource: {
+				for sourceName, blocks in in.resource
+				for blockName, block in blocks {
+					let providerName = [
+						if block.#provider != _|_ {block.#provider},
+						strings.SplitN(sourceName, "_", 2)[0],
+					][0]
+					(sourceName): (blockName): block & {
+						if block.#provider != _|_ || block.#providerAlias != _|_ {
+							"provider": [
+								if block.#providerAlias != _|_ {"\(providerName).\(block.#providerAlias)"},
+								providerName,
+							][0]
+						}
+					}
+				}
+			}
+		}
 	}
 }
 
@@ -363,9 +412,10 @@ _#GenerateProviders: {
 	in:               #TerraformInput
 
 	out: #TerraformOutput & {
-		let usedProviders = {
+		let directProviders = {
 			for source in [if in.resource != _|_ {in.resource}, if in.data != _|_ {in.data}]
-			for sourceName, block in source {
+			for sourceName, blocks in source
+			for _, block in blocks {
 				let name = [
 					if block.#provider != _|_ {block.#provider},
 					strings.SplitN(sourceName, "_", 2)[0],
@@ -377,29 +427,112 @@ _#GenerateProviders: {
 				(name): (alias): true
 			}
 		}
+		let bootstrapProviders = {
+			for providerName, aliases in directProviders if #BuiltinProviders[providerName] == _|_ {
+				let registration = providerRegistry[providerName]
+				let providerBlocks = [
+					for alias, _ in aliases {[
+						if alias == _#DefaultProviderAlias {registration.default},
+						registration.aliases[alias] & {"alias": alias},
+					][0]},
+				]
 
-		for providerName, aliases in usedProviders if #BuiltinProviders[providerName] == _|_ {
+				for block in providerBlocks {
+					for source in [
+						if block.bootstrap.resource != _|_ {block.bootstrap.resource},
+						if block.bootstrap.data != _|_ {block.bootstrap.data},
+					]
+					for sourceName, blocks in source
+					for _, bootstrapBlock in blocks {
+						let name = [
+							if bootstrapBlock.#provider != _|_ {bootstrapBlock.#provider},
+							strings.SplitN(sourceName, "_", 2)[0],
+						][0]
+						let alias = [
+							if bootstrapBlock.#providerAlias != _|_ {bootstrapBlock.#providerAlias},
+							_#DefaultProviderAlias,
+						][0]
+						(name): (alias): true
+					}
+				}
+			}
+		}
+		let directProviderInstances = [
+			for name, aliases in directProviders
+			for alias, _ in aliases {
+				"name":  name
+				"alias": alias
+			},
+		]
+		let bootstrapProviderInstances = [
+			for name, aliases in bootstrapProviders
+			for alias, _ in aliases {
+				"name":  name
+				"alias": alias
+			},
+		]
+		let providerInstances = list.Concat([directProviderInstances, bootstrapProviderInstances])
+		let selectedProviders = {
+			for instance in providerInstances {
+				(instance.name): (instance.alias): true
+			}
+		}
+		let emittedBootstrapProviders = {
+			for providerName, aliases in selectedProviders if #BuiltinProviders[providerName] == _|_ {
+				let registration = providerRegistry[providerName]
+				let providerBlocks = [
+					for alias, _ in aliases {[
+						if alias == _#DefaultProviderAlias {registration.default},
+						registration.aliases[alias] & {provider: "alias": alias},
+					][0]},
+				]
+
+				for block in providerBlocks {
+					for source in [
+						if block.bootstrap.resource != _|_ {block.bootstrap.resource},
+						if block.bootstrap.data != _|_ {block.bootstrap.data},
+					]
+					for sourceName, blocks in source
+					for _, bootstrapBlock in blocks {
+						let name = [
+							if bootstrapBlock.#provider != _|_ {bootstrapBlock.#provider},
+							strings.SplitN(sourceName, "_", 2)[0],
+						][0]
+						let alias = [
+							if bootstrapBlock.#providerAlias != _|_ {bootstrapBlock.#providerAlias},
+							_#DefaultProviderAlias,
+						][0]
+						(name): (alias): true
+					}
+				}
+			}
+		}
+		#bootstrapDependencies: {
+			for name, aliases in emittedBootstrapProviders
+			for alias, _ in aliases
+			if !list.Contains(providerInstances, {"name": name, "alias": alias}) {
+				(name): (alias): _|_("provider bootstrap dependencies must be one level deep")
+			}
+		}
+
+		for providerName, aliases in selectedProviders if #BuiltinProviders[providerName] == _|_ {
 			let registration = providerRegistry[providerName]
 			terraform: required_providers: (providerName): registration.requiredProvider
 
 			let providerBlocks = [
 				for alias, _ in aliases {[
 					if alias == _#DefaultProviderAlias {registration.default},
-					registration.aliases[alias] & {"alias": alias},
+					registration.aliases[alias] & {provider: "alias": alias},
 				][0]},
 			]
 
 			for block in providerBlocks {
-				// The bootstrap block should always exist, so this is weird.
-				// TODO (LUM-16): Remove this if when we figure out why this exists.
-				if block.bootstrap != _|_ {
-					block.bootstrap & {
-						#module:         in.#module
-						#backendConfigs: in.#backendConfigs
-						#envName:        in.#envName
-						#env:            in.#env
-					}
-				}
+				(_#RenderTerraformInput & {in: block.bootstrap & {
+					#module:         in.#module
+					#backendConfigs: in.#backendConfigs
+					#envName:        in.#envName
+					#env:            in.#env
+				}}).out
 			}
 			"provider": (providerName): [for block in providerBlocks {block.provider}]
 		}
@@ -481,5 +614,6 @@ _#GenerateMoves: {
 		if len(moves) != 0 {
 			moved: moves
 		}
+		...
 	}
 }

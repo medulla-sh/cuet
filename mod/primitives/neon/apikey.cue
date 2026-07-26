@@ -12,7 +12,6 @@ import (
 	out: T.#TerraformInput & {
 		resource: neon_api_key: (in.name): {
 			name: in.name
-			...
 		}
 	}
 }
