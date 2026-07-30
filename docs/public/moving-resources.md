@@ -1,8 +1,9 @@
 # Moving resources
 
 Cuet records Terraform identity changes with hidden `#history` fields. It uses
-native Terraform `moved` blocks for changes within one state and delegates
-cross-state moves to [tfmigrate](https://github.com/minamijoyo/tfmigrate).
+native Terraform `moved` blocks for changes within one state, delegates partial
+cross-state moves to [tfmigrate](https://github.com/minamijoyo/tfmigrate), and
+uses native backend migration for complete state moves.
 
 ## Resource history
 
@@ -87,10 +88,13 @@ infra: in: prod: {
 }
 ```
 
-The most recent target is the source of the pending migration. Cuet evaluates
-its backend configuration from the current module, so the old module directory
-does not need to remain in the workspace. The generated tfmigrate action moves
-all state entries with `xmv * $1`.
+The most recent target is the source of the pending migration. Cuet exports the
+complete current configuration, evaluates the historical backend separately,
+and substitutes only the root `terraform.backend` value in its temporary copy.
+This preserves current provider constraints and resource identities, and means
+the old module directory does not need to remain in the workspace. OpenTofu's
+native backend migration copies the complete state snapshot, including
+resources and root outputs.
 
 Module history and individual cross-state resource histories cannot be pending
 in the same environment. Individual resource moves in one migration must all
@@ -98,34 +102,91 @@ originate from the same module environment.
 
 ## Plan and apply
 
-Select the destination module environment and plan the generated migration:
+After moving a complete module directory, check the repository layout:
 
 ```bash
-cuet -t /infra/new:prod tfmigrate plan
+cuet -t /infra/new:prod migrate check
 ```
 
-Cuet performs the following steps:
+For module history, the check requires a tracked provider lock to move from
+`.cuet/<old-env>/.terraform.lock.hcl` under the historical module to the
+equivalent destination path. Providerless modules may have no lock. It also
+rejects stale tfmigrate artifacts and validates the current Terraform and
+historical backend shapes. Only the root backend is replaced by construction.
+The check is local-only and does not require OpenTofu or cloud credentials.
+
+Inspect structured migration details for CI finalization:
+
+```bash
+cuet -t /infra/new:prod migrate inspect
+```
+
+The JSON output includes source and destination module identities,
+environments, safe backend location fields, and lockfile paths. Each endpoint
+includes `backendLocationComplete`; unknown or secret-bearing backend shapes
+are intentionally incomplete and require backend-specific configuration.
+
+Plan the migration against remote state:
+
+```bash
+cuet -t /infra/new:prod migrate plan
+```
+
+For module history, Cuet performs the following steps:
 
 1. Evaluates the selected environment's history.
-1. Exports the destination Terraform configuration.
-1. Exports the source configuration or a historical backend-only configuration.
-1. Writes `.cuet/<env>/tfmigrate.json` using tfmigrate's HCL JSON syntax.
-1. Runs tfmigrate from the destination environment's generated directory.
+1. Initializes a clean generated directory against the historical backend.
+1. Exports the destination configuration with a temporary local backend.
+1. Uses `tofu init -migrate-state` to copy the complete source snapshot locally.
+1. Requires the destination configuration to produce a no-change plan.
 
-The plan simulates the migration against temporary states and requires both
-Terraform plans to have no changes. It does not update remote state.
+The plan locks and reads the source state but does not update either remote
+backend.
+
+For resource history, Cuet exports the source and destination configurations
+and runs tfmigrate. The tfmigrate plan simulates the selected resource moves
+against temporary states and requires both Terraform plans to have no changes.
 
 Apply the migration explicitly after reviewing the plan:
 
 ```bash
-cuet -t /infra/new:prod tfmigrate apply
+cuet -t /infra/new:prod migrate apply
 ```
 
-Additional tfmigrate plan or apply flags are forwarded after the subcommand:
+Module apply repeats the local preflight, then uses interactive
+`tofu init -migrate-state` to copy the complete snapshot to the destination.
+OpenTofu attempts to lock both states during the copy. Cuet verifies that the
+destination contains the source lineage and serial before reporting success.
+Complete module migration currently requires the backend to contain exactly the
+default workspace because native backend migration would otherwise copy
+unvalidated workspaces. The historical backend remains unchanged for recovery;
+prevent concurrent state operations during the migration and applies through
+the historical module afterward so the states cannot diverge.
+
+Before applying, Cuet requires the destination state to be empty or to exactly
+match the complete source snapshot. A matching snapshot is treated as already
+migrated and only receives a no-change plan. Any other non-empty destination
+fails closed. State-changing module migration remains interactive: OpenTofu has
+no backend-agnostic atomic compare-and-swap operation that would make forced
+noninteractive overwrite safe. A protected CI job can run the command with an
+attached approval terminal, but Cuet does not bypass OpenTofu's confirmation.
+
+Native backend migration copies state because OpenTofu has no backend-agnostic
+source deletion command. Use `migrate inspect` to drive a backend-specific
+post-copy cleanup step. For versioned object storage, remove only the old live
+object and retain historical versions for recovery. Once cleanup removes the
+source live state, further migration plan/apply commands fail closed because
+Cuet can no longer independently prove the relationship between source and
+destination; the backend-specific finalizer should treat source absence as its
+own completion marker.
+
+Additional tfmigrate flags remain available for resource migrations:
 
 ```bash
-cuet -t /infra/new:prod tfmigrate plan --out=migration.tfplan
+cuet -t /infra/new:prod migrate plan --out=migration.tfplan
 ```
+
+Resource apply delegates the selected moves to tfmigrate.
 
 ## Installation
 
@@ -135,9 +196,10 @@ Install tfmigrate with Homebrew:
 brew install tfmigrate
 ```
 
-Cuet uses `tfmigrate` from `PATH` by default. Use `--tfmigrate-path` to select
-another binary. The configured `--tf-path` is passed through to tfmigrate, so
-the migration uses the same OpenTofu or Terraform binary as other cuet commands.
+Partial cross-state resource moves require `tfmigrate` on `PATH`. Use
+`--tfmigrate-path` to select another binary. Complete module moves do not
+require tfmigrate. The configured `--tf-path` selects the OpenTofu or Terraform
+binary used by either migration type.
 
 tfmigrate temporarily switches each generated working directory to a local
 backend. If an interrupted migration leaves `_tfmigrate_override.tf` behind,

@@ -136,32 +136,44 @@ pub enum Commands {
         args: Vec<String>,
     },
 
-    /// Run tfmigrate for the selected module environment
-    Tfmigrate {
+    /// Migrate state for the selected module environment
+    Migrate {
         #[command(subcommand)]
-        command: TfmigrateCommand,
+        command: MigrationCommand,
     },
 }
 
 #[derive(Subcommand, Debug)]
-pub enum TfmigrateCommand {
+pub enum MigrationCommand {
+    /// Validate migration history and repository layout
+    Check,
+    /// Print migration details as JSON
+    Inspect,
     /// Validate a migration without updating remote state
     Plan {
         #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
         args: Vec<String>,
     },
-    /// Apply a migration to both remote states
+    /// Apply a migration to remote state
     Apply {
         #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
         args: Vec<String>,
     },
 }
 
-impl TfmigrateCommand {
-    pub fn command_and_args(&self) -> (&'static str, &[String]) {
+impl MigrationCommand {
+    pub fn tfmigrate_command_and_args(&self) -> Option<(&'static str, &[String])> {
         match self {
-            Self::Plan { args } => ("plan", args),
-            Self::Apply { args } => ("apply", args),
+            Self::Plan { args } => Some(("plan", args)),
+            Self::Apply { args } => Some(("apply", args)),
+            Self::Check | Self::Inspect => None,
+        }
+    }
+
+    pub fn args(&self) -> &[String] {
+        match self {
+            Self::Plan { args } | Self::Apply { args } => args,
+            Self::Check | Self::Inspect => &[],
         }
     }
 }
@@ -206,7 +218,7 @@ impl CueCommand {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, Commands, CueCommand, ModuleTarget, ModulesCommand, Target, TfmigrateCommand,
+        Cli, Commands, CueCommand, MigrationCommand, ModuleTarget, ModulesCommand, Target,
     };
     use clap::Parser;
     use clap::error::ErrorKind;
@@ -373,23 +385,17 @@ mod tests {
     }
 
     #[test]
-    fn test_cli_parses_tfmigrate_arguments() {
-        let cli = Cli::try_parse_from([
-            "cuet",
-            "-t",
-            "/infra/new:prod",
-            "tfmigrate",
-            "plan",
-            "--out=migration.tfplan",
-        ])
-        .unwrap();
+    fn test_cli_parses_migrate_command() {
+        let cli =
+            Cli::try_parse_from(["cuet", "-t", "/infra/new:prod", "migrate", "plan"]).unwrap();
 
-        let Commands::Tfmigrate {
-            command: TfmigrateCommand::Plan { args },
+        let Commands::Migrate {
+            command: MigrationCommand::Plan { args },
         } = cli.command
         else {
-            panic!("expected tfmigrate plan command");
+            panic!("expected migrate plan command");
         };
+        assert!(args.is_empty());
         assert_eq!(
             cli.target,
             Some(Target {
@@ -397,7 +403,33 @@ mod tests {
                 environment: Some("prod".to_owned()),
             })
         );
-        assert_eq!(args, ["--out=migration.tfplan"]);
+    }
+
+    #[test]
+    fn test_cli_parses_migration_automation_commands() {
+        let check = Cli::try_parse_from(["cuet", "migrate", "check"]).unwrap();
+        let inspect = Cli::try_parse_from(["cuet", "migrate", "inspect"]).unwrap();
+        let apply = Cli::try_parse_from(["cuet", "migrate", "apply", "--config=ci.hcl"]).unwrap();
+
+        assert!(matches!(
+            check.command,
+            Commands::Migrate {
+                command: MigrationCommand::Check
+            }
+        ));
+        assert!(matches!(
+            inspect.command,
+            Commands::Migrate {
+                command: MigrationCommand::Inspect
+            }
+        ));
+        assert!(matches!(
+            apply.command,
+            Commands::Migrate {
+                command: MigrationCommand::Apply { args }
+            }
+            if args == ["--config=ci.hcl"]
+        ));
     }
 
     #[test]

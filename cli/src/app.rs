@@ -1,18 +1,21 @@
-use crate::cli::{Cli, Commands, Env, ModuleTarget, ModulesCommand, TfmigrateCommand, parse_env};
+use crate::cli::{Cli, Commands, Env, MigrationCommand, ModuleTarget, ModulesCommand, parse_env};
 use crate::completions;
 use crate::environment;
 use crate::execution::{
-    check_cue_export, export_historical_backend, export_terraform, read_tfmigrate_metadata,
-    resolve_tool, run_cue, run_tf, run_tfmigrate,
+    capture_tf_in, check_cue_export, export_historical_backend, export_terraform,
+    export_terraform_to, export_terraform_with_backend_to, output_tf_in, read_backend_config,
+    read_migration_metadata, read_terraform_config, replace_root_backend, resolve_tool, run_cue,
+    run_tf, run_tf_in, run_tfmigrate,
 };
 use crate::logger::Logger;
 use crate::workspace::{Workspace, discover_modules, resolve_root};
 use clap::CommandFactory;
 use miette::{IntoDiagnostic, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
+use std::path::Component;
 use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::thread;
@@ -151,28 +154,29 @@ fn run_target_command(
             )
             .map(Some)
         }
-        Commands::Tfmigrate { command } => {
-            let tf_bin = resolve_tool(
-                &invocation
-                    .tf_path
-                    .unwrap_or_else(|| PathBuf::from(DEFAULT_TF_BIN)),
-            )?;
-            let tfmigrate_bin = resolve_tool(
-                &invocation
-                    .tfmigrate_path
-                    .unwrap_or_else(|| PathBuf::from(DEFAULT_TFMIGRATE_BIN)),
-            )?;
-            TfmigrateRunner {
+        Commands::Migrate { command } => {
+            let tf_bin = if matches!(
+                command,
+                MigrationCommand::Plan { .. } | MigrationCommand::Apply { .. }
+            ) {
+                Some(resolve_tool(
+                    &invocation
+                        .tf_path
+                        .unwrap_or_else(|| PathBuf::from(DEFAULT_TF_BIN)),
+                )?)
+            } else {
+                None
+            };
+            MigrationRunner {
                 logger: &logger,
                 workspace: &workspace,
                 env: &env,
                 cue_bin: &cue_bin,
-                tf_bin: &tf_bin,
-                tfmigrate_bin: &tfmigrate_bin,
+                tf_bin: tf_bin.as_deref(),
+                tfmigrate_path: invocation.tfmigrate_path.as_deref(),
                 backend_override_value: &backend_override_value,
             }
             .run(&command)
-            .map(Some)
         }
         Commands::Modules { .. } => {
             unreachable!("modules command handled before tool resolution")
@@ -219,14 +223,14 @@ fn log_target_configuration(
     );
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct MigrationMetadata {
     module_history: Vec<String>,
     resource_transitions: Vec<ResourceTransition>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ResourceTransition {
     resource_type: String,
@@ -234,20 +238,74 @@ struct ResourceTransition {
     to: ResourceIdentity,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct ResourceIdentity {
     module: String,
     env: Env,
     name: String,
 }
 
-struct TfmigrateRunner<'a> {
+#[derive(Deserialize)]
+struct StateSnapshotMetadata {
+    lineage: String,
+    serial: u64,
+    #[serde(flatten)]
+    contents: BTreeMap<String, serde_json::Value>,
+}
+
+enum StateSnapshot {
+    Missing,
+    Present(StateSnapshotMetadata),
+}
+
+enum DestinationAction {
+    Copy,
+    Current,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MigrationEndpoint {
+    module: String,
+    environment: Env,
+    backend: serde_json::Value,
+    backend_location_complete: bool,
+    lock_file: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModuleMigrationInspection {
+    kind: &'static str,
+    source: MigrationEndpoint,
+    destination: MigrationEndpoint,
+}
+
+struct MigrationDirectory(PathBuf);
+
+impl MigrationDirectory {
+    fn new(path: PathBuf) -> Self {
+        Self(path)
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for MigrationDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+struct MigrationRunner<'a> {
     logger: &'a Logger,
     workspace: &'a Workspace,
     env: &'a Env,
     cue_bin: &'a std::path::Path,
-    tf_bin: &'a std::path::Path,
-    tfmigrate_bin: &'a std::path::Path,
+    tf_bin: Option<&'a std::path::Path>,
+    tfmigrate_path: Option<&'a std::path::Path>,
     backend_override_value: &'a str,
 }
 
@@ -262,9 +320,14 @@ enum Preparation {
     CommandFailed(ExitStatus),
 }
 
-impl TfmigrateRunner<'_> {
-    fn run(&self, command: &TfmigrateCommand) -> Result<ExitStatus> {
-        let metadata: MigrationMetadata = serde_json::from_value(read_tfmigrate_metadata(
+impl MigrationRunner<'_> {
+    fn tf_bin(&self) -> Result<&std::path::Path> {
+        self.tf_bin
+            .ok_or_else(|| miette::miette!("Migration command requires OpenTofu"))
+    }
+
+    fn run(&self, command: &MigrationCommand) -> Result<Option<ExitStatus>> {
+        let metadata: MigrationMetadata = serde_json::from_value(read_migration_metadata(
             self.workspace,
             self.env,
             self.cue_bin,
@@ -278,33 +341,59 @@ impl TfmigrateRunner<'_> {
             ));
         }
 
+        if let Some(target) = metadata.module_history.last() {
+            return self.run_module(command, target);
+        }
+
+        if matches!(command, MigrationCommand::Check) {
+            if transitions.is_empty() {
+                return Err(miette::miette!(
+                    "No migration history exists for {}:{}",
+                    self.workspace.module_name(),
+                    self.env
+                ));
+            }
+            return Ok(None);
+        }
+        if matches!(command, MigrationCommand::Inspect) {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&metadata).into_diagnostic()?
+            );
+            return Ok(None);
+        }
+
         let (status, destination_dir) = self.export_destination()?;
         if !status.success() {
-            return Ok(status);
+            return Ok(Some(status));
         }
-        let preparation = if let Some(target) = metadata.module_history.last() {
-            self.prepare_module(target, &destination_dir)?
-        } else {
-            self.prepare_resources(&transitions, &destination_dir)?
-        };
+        let preparation = self.prepare_resources(&transitions, &destination_dir)?;
         let Preparation::Ready(prepared) = preparation else {
             let Preparation::CommandFailed(status) = preparation else {
                 unreachable!()
             };
-            return Ok(status);
+            return Ok(Some(status));
         };
 
         let migration = migration_json(&prepared);
-        let (operation, args) = command.command_and_args();
+        let tfmigrate_bin = resolve_tool(
+            self.tfmigrate_path
+                .unwrap_or_else(|| std::path::Path::new(DEFAULT_TFMIGRATE_BIN)),
+        )?;
+        let (operation, args) = command
+            .tfmigrate_command_and_args()
+            .ok_or_else(|| miette::miette!("Migration command requires no tfmigrate operation"))?;
         run_tfmigrate(
             self.logger,
-            self.tfmigrate_bin,
-            self.tf_bin,
+            &tfmigrate_bin,
+            self.tf_bin
+                .ok_or_else(|| miette::miette!("Migration command requires OpenTofu"))?,
             operation,
             args,
             &destination_dir,
             &migration,
         )
+        .map(Some)
     }
 
     fn current_transitions<'m>(
@@ -331,35 +420,365 @@ impl TfmigrateRunner<'_> {
         )
     }
 
-    fn prepare_module(
+    fn check_module_layout(&self, source_module: &str, source_env: &Env) -> Result<()> {
+        let source_module_path = workspace_module_path(self.workspace.root(), source_module)?;
+        let source_lock = source_module_path
+            .join(".cuet")
+            .join(source_env)
+            .join(".terraform.lock.hcl");
+        let destination_lock = self
+            .workspace
+            .target_dir()
+            .join(".cuet")
+            .join(self.env)
+            .join(".terraform.lock.hcl");
+        let output_dir = self.workspace.target_dir().join(".cuet").join(self.env);
+        let scratch_dir = output_dir.with_file_name(format!("{}.migrate", self.env));
+        ensure_module_migration_files(&source_lock, &destination_lock, &output_dir, &scratch_dir)?;
+
+        let mut current = read_terraform_config(self.workspace, self.env, self.cue_bin)?;
+        let historical =
+            read_backend_config(self.workspace, source_module, source_env, self.cue_bin)?;
+        if has_required_providers(&current) && !destination_lock.is_file() {
+            return Err(miette::miette!(
+                "Destination provider lock is missing at '{}'",
+                destination_lock.display()
+            ));
+        }
+        if has_required_providers(&current)
+            && std::fs::metadata(&destination_lock)
+                .into_diagnostic()?
+                .len()
+                == 0
+        {
+            return Err(miette::miette!(
+                "Destination provider lock is empty at '{}'",
+                destination_lock.display()
+            ));
+        }
+        replace_root_backend(&mut current, &historical)?;
+        Ok(())
+    }
+
+    fn inspect_module(
         &self,
-        target: &str,
-        destination_dir: &std::path::Path,
-    ) -> Result<Preparation> {
+        source_module: &str,
+        source_env: &Env,
+    ) -> Result<ModuleMigrationInspection> {
+        let source_backend =
+            read_backend_config(self.workspace, source_module, source_env, self.cue_bin)?;
+        let destination_backend = read_backend_config(
+            self.workspace,
+            self.workspace.module_name(),
+            self.env,
+            self.cue_bin,
+        )?;
+        let (source_backend, source_backend_location_complete) =
+            inspected_backend(&source_backend)?;
+        let (destination_backend, destination_backend_location_complete) =
+            inspected_backend(&destination_backend)?;
+        Ok(ModuleMigrationInspection {
+            kind: "module",
+            source: MigrationEndpoint {
+                module: source_module.to_owned(),
+                environment: source_env.clone(),
+                backend: source_backend,
+                backend_location_complete: source_backend_location_complete,
+                lock_file: module_lock_path(source_module, source_env),
+            },
+            destination: MigrationEndpoint {
+                module: self.workspace.module_name().to_owned(),
+                environment: self.env.clone(),
+                backend: destination_backend,
+                backend_location_complete: destination_backend_location_complete,
+                lock_file: module_lock_path(self.workspace.module_name(), self.env),
+            },
+        })
+    }
+
+    fn run_module(&self, command: &MigrationCommand, target: &str) -> Result<Option<ExitStatus>> {
+        if self.backend_override_value != "null" {
+            return Err(miette::miette!(
+                "Module migrations cannot be combined with --use-local-backend"
+            ));
+        }
         let (source_module, source_env) = parse_history_target(target, self.env)?;
         if source_module == self.workspace.module_name() && source_env == *self.env {
             return Err(miette::miette!(
                 "The latest module history target is the current target"
             ));
         }
-        let source_dir = destination_dir.join(".tfmigrate/from");
-        let status = export_historical_backend(
+        self.check_module_layout(&source_module, &source_env)?;
+        if matches!(command, MigrationCommand::Check) {
+            return Ok(None);
+        }
+        if matches!(command, MigrationCommand::Inspect) {
+            let inspection = self.inspect_module(&source_module, &source_env)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&inspection).into_diagnostic()?
+            );
+            return Ok(None);
+        }
+        if !command.args().is_empty() {
+            return Err(miette::miette!(
+                "Additional migration arguments are supported only for resource migrations"
+            ));
+        }
+        let (status, destination_dir) = self.export_destination()?;
+        if !status.success() {
+            return Ok(Some(status));
+        }
+        let migration_dir = MigrationDirectory::new(
+            destination_dir.with_file_name(format!("{}.migrate", self.env)),
+        );
+
+        let status = self.plan_module(&source_module, &source_env, migration_dir.path())?;
+        if !status.success() || matches!(command, MigrationCommand::Plan { .. }) {
+            return Ok(Some(status));
+        }
+
+        self.apply_module(&source_module, &source_env, migration_dir.path())
+            .map(Some)
+    }
+
+    fn apply_module(
+        &self,
+        source_module: &str,
+        source_env: &Env,
+        migration_dir: &std::path::Path,
+    ) -> Result<ExitStatus> {
+        let status = self.prepare_module_source(source_module, source_env, migration_dir)?;
+        if !status.success() {
+            return Ok(status);
+        }
+        let StateSnapshot::Present(source_metadata) = self.read_state_snapshot(migration_dir)?
+        else {
+            return Err(miette::miette!(
+                "Source state is missing; cannot verify that the migration was previously applied"
+            ));
+        };
+
+        let destination_dir = MigrationDirectory::new(
+            migration_dir.with_file_name(format!("{}.destination", self.env)),
+        );
+        let status = self.prepare_module_destination(destination_dir.path())?;
+        if !status.success() {
+            return Ok(status);
+        }
+        if matches!(
+            destination_action(
+                &source_metadata,
+                &self.read_state_snapshot(destination_dir.path())?
+            )?,
+            DestinationAction::Current
+        ) {
+            return run_tf_in(
+                self.logger,
+                self.tf_bin()?,
+                destination_dir.path(),
+                &["plan", "-detailed-exitcode", "-lock-timeout=5m"],
+            );
+        }
+        let status = export_terraform_to(
             self.logger,
             self.workspace,
-            &source_module,
-            &source_env,
+            self.env,
             self.cue_bin,
-            self.backend_override_value,
-            &source_dir,
+            "null",
+            migration_dir,
         )?;
         if !status.success() {
-            return Ok(Preparation::CommandFailed(status));
+            return Ok(status);
         }
-        Ok(Preparation::Ready(PreparedMigration {
-            source_dir,
-            actions: vec!["xmv * $1".to_owned()],
-            from_skip_plan: true,
-        }))
+        let status = run_tf_in(
+            self.logger,
+            self.tf_bin()?,
+            migration_dir,
+            &[
+                "init",
+                "-migrate-state",
+                "-lockfile=readonly",
+                "-lock-timeout=5m",
+            ],
+        )?;
+        if !status.success() {
+            return Ok(status);
+        }
+        let destination_state = output_tf_in(
+            self.logger,
+            self.tf_bin()?,
+            migration_dir,
+            &["state", "pull"],
+        )?;
+        if !destination_state.status.success() {
+            return Ok(destination_state.status);
+        }
+        let destination_metadata = state_snapshot_metadata(&destination_state.stdout)?;
+        ensure_migrated_snapshot(&source_metadata, &destination_metadata)?;
+        run_tf_in(
+            self.logger,
+            self.tf_bin()?,
+            migration_dir,
+            &["plan", "-detailed-exitcode", "-lock-timeout=5m"],
+        )
+    }
+
+    fn plan_module(
+        &self,
+        source_module: &str,
+        source_env: &Env,
+        migration_dir: &std::path::Path,
+    ) -> Result<ExitStatus> {
+        let status = self.prepare_module_source(source_module, source_env, migration_dir)?;
+        if !status.success() {
+            return Ok(status);
+        }
+        if matches!(
+            self.read_state_snapshot(migration_dir)?,
+            StateSnapshot::Missing
+        ) {
+            return Err(miette::miette!(
+                "Source state is missing; cannot validate the migration"
+            ));
+        }
+        let local_backend = serde_json::Value::String("local.tfstate".to_owned()).to_string();
+        let status = export_terraform_to(
+            self.logger,
+            self.workspace,
+            self.env,
+            self.cue_bin,
+            &local_backend,
+            migration_dir,
+        )?;
+        if !status.success() {
+            return Ok(status);
+        }
+        let status = run_tf_in(
+            self.logger,
+            self.tf_bin()?,
+            migration_dir,
+            &[
+                "init",
+                "-migrate-state",
+                "-force-copy",
+                "-input=false",
+                "-lockfile=readonly",
+                "-lock-timeout=5m",
+            ],
+        )?;
+        if !status.success() {
+            return Ok(status);
+        }
+        run_tf_in(
+            self.logger,
+            self.tf_bin()?,
+            migration_dir,
+            &["plan", "-detailed-exitcode", "-lock-timeout=5m"],
+        )
+    }
+
+    fn prepare_module_destination(&self, destination_dir: &std::path::Path) -> Result<ExitStatus> {
+        if destination_dir.exists() {
+            std::fs::remove_dir_all(destination_dir).into_diagnostic()?;
+        }
+        let status = export_terraform_to(
+            self.logger,
+            self.workspace,
+            self.env,
+            self.cue_bin,
+            "null",
+            destination_dir,
+        )?;
+        if !status.success() {
+            return Ok(status);
+        }
+        self.copy_provider_lock(destination_dir)?;
+        run_tf_in(
+            self.logger,
+            self.tf_bin()?,
+            destination_dir,
+            &["init", "-input=false", "-lockfile=readonly"],
+        )
+    }
+
+    fn read_state_snapshot(&self, directory: &std::path::Path) -> Result<StateSnapshot> {
+        let output = capture_tf_in(self.logger, self.tf_bin()?, directory, &["state", "pull"])?;
+        if output.status.success() {
+            return state_snapshot_metadata(&output.stdout).map(StateSnapshot::Present);
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if state_snapshot_missing(&stderr) {
+            return Ok(StateSnapshot::Missing);
+        }
+        Err(miette::miette!(
+            "Failed to read state snapshot: {}",
+            stderr.trim()
+        ))
+    }
+
+    fn prepare_module_source(
+        &self,
+        source_module: &str,
+        source_env: &Env,
+        migration_dir: &std::path::Path,
+    ) -> Result<ExitStatus> {
+        if migration_dir.exists() {
+            std::fs::remove_dir_all(migration_dir).into_diagnostic()?;
+        }
+        let status = export_terraform_with_backend_to(
+            self.logger,
+            self.workspace,
+            self.env,
+            source_module,
+            source_env,
+            self.cue_bin,
+            migration_dir,
+        )?;
+        if !status.success() {
+            return Ok(status);
+        }
+        self.copy_provider_lock(migration_dir)?;
+        let status = run_tf_in(
+            self.logger,
+            self.tf_bin()?,
+            migration_dir,
+            &["init", "-input=false", "-lockfile=readonly"],
+        )?;
+        if !status.success() {
+            return Ok(status);
+        }
+        let workspaces = output_tf_in(
+            self.logger,
+            self.tf_bin()?,
+            migration_dir,
+            &["workspace", "list", "-no-color"],
+        )?;
+        if !workspaces.status.success() {
+            return Ok(workspaces.status);
+        }
+        ensure_default_workspace(&workspaces.stdout)?;
+        Ok(status)
+    }
+
+    fn copy_provider_lock(&self, destination_dir: &std::path::Path) -> Result<()> {
+        let source = self
+            .workspace
+            .target_dir()
+            .join(".cuet")
+            .join(self.env)
+            .join(".terraform.lock.hcl");
+        if source.is_file() {
+            std::fs::copy(&source, destination_dir.join(".terraform.lock.hcl"))
+                .into_diagnostic()
+                .map_err(|error| {
+                    miette::miette!(
+                        "Failed to copy provider lock from '{}': {error}",
+                        source.display()
+                    )
+                })?;
+        }
+        Ok(())
     }
 
     fn prepare_resources(
@@ -424,6 +843,187 @@ impl TfmigrateRunner<'_> {
         )?;
         Ok((status, source_dir, true))
     }
+}
+
+fn ensure_default_workspace(output: &[u8]) -> Result<()> {
+    let output = String::from_utf8_lossy(output);
+    let workspaces: Vec<_> = output
+        .lines()
+        .map(|workspace| workspace.trim_start_matches('*').trim())
+        .filter(|workspace| !workspace.is_empty())
+        .collect();
+    if workspaces != ["default"] {
+        return Err(miette::miette!(
+            "Module migration requires exactly the default workspace; found: {}",
+            workspaces.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+fn workspace_module_path(root: &std::path::Path, module: &str) -> Result<PathBuf> {
+    let path = std::path::Path::new(module);
+    if module.is_empty()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(miette::miette!(
+            "Historical module must be a workspace-relative path: {module}"
+        ));
+    }
+    Ok(root.join(path))
+}
+
+fn ensure_module_migration_files(
+    source_lock: &std::path::Path,
+    destination_lock: &std::path::Path,
+    output_dir: &std::path::Path,
+    scratch_dir: &std::path::Path,
+) -> Result<()> {
+    if source_lock.exists() {
+        return Err(miette::miette!(
+            "Historical provider lock still exists at '{}'; move it to '{}'",
+            source_lock.display(),
+            destination_lock.display()
+        ));
+    }
+    for artifact in [
+        output_dir.join("tfmigrate.json"),
+        output_dir.join("_tfmigrate_override.tf"),
+        output_dir.join(".tfmigrate"),
+    ] {
+        if artifact.exists() {
+            return Err(miette::miette!(
+                "Stale tfmigrate artifact exists at '{}'; remove it for native module migration",
+                artifact.display()
+            ));
+        }
+    }
+    if scratch_dir.exists() {
+        return Err(miette::miette!(
+            "Stale module migration directory exists at '{}'; remove it before continuing",
+            scratch_dir.display()
+        ));
+    }
+    Ok(())
+}
+
+fn module_lock_path(module: &str, env: &Env) -> String {
+    std::path::Path::new(module)
+        .join(".cuet")
+        .join(env)
+        .join(".terraform.lock.hcl")
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn root_backend(config: &serde_json::Value) -> Result<&serde_json::Value> {
+    config
+        .get("terraform")
+        .and_then(|terraform| terraform.get("backend"))
+        .ok_or_else(|| miette::miette!("Terraform configuration has no root backend"))
+}
+
+fn inspected_backend(config: &serde_json::Value) -> Result<(serde_json::Value, bool)> {
+    const LOCATION_FIELDS: [&str; 14] = [
+        "bucket",
+        "container_name",
+        "hostname",
+        "key",
+        "namespace",
+        "organization",
+        "path",
+        "prefix",
+        "project",
+        "region",
+        "resource_group_name",
+        "secret_suffix",
+        "storage_account_name",
+        "workspace_key_prefix",
+    ];
+    let backend = root_backend(config)?
+        .as_object()
+        .ok_or_else(|| miette::miette!("Terraform root backend must be an object"))?;
+    if backend.len() != 1 {
+        return Err(miette::miette!(
+            "Terraform root backend must contain exactly one backend type"
+        ));
+    }
+    let (backend_type, backend_config) = backend
+        .iter()
+        .next()
+        .ok_or_else(|| miette::miette!("Terraform root backend is empty"))?;
+    let backend_config = backend_config
+        .as_object()
+        .ok_or_else(|| miette::miette!("Terraform backend configuration must be an object"))?;
+    let mut safe_config: serde_json::Map<_, _> = backend_config
+        .iter()
+        .filter(|(key, _)| LOCATION_FIELDS.contains(&key.as_str()))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    if backend_type == "consul"
+        && let Some(address) = backend_config.get("address")
+    {
+        safe_config.insert("address".to_owned(), address.clone());
+    }
+    if backend_type == "remote"
+        && let Some(workspaces) = backend_config.get("workspaces")
+    {
+        safe_config.insert("workspaces".to_owned(), workspaces.clone());
+    }
+    let complete = matches!(backend_type.as_str(), "gcs" | "local");
+    Ok((serde_json::json!({backend_type: safe_config}), complete))
+}
+
+fn has_required_providers(config: &serde_json::Value) -> bool {
+    config
+        .get("terraform")
+        .and_then(|terraform| terraform.get("required_providers"))
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|providers| !providers.is_empty())
+}
+
+fn state_snapshot_missing(stderr: &str) -> bool {
+    stderr.contains("No state file was found")
+}
+
+fn state_snapshot_metadata(output: &[u8]) -> Result<StateSnapshotMetadata> {
+    serde_json::from_slice(output)
+        .into_diagnostic()
+        .map_err(|error| miette::miette!("Failed to read state snapshot metadata: {error}"))
+}
+
+fn ensure_migrated_snapshot(
+    source: &StateSnapshotMetadata,
+    destination: &StateSnapshotMetadata,
+) -> Result<()> {
+    if source.lineage != destination.lineage || destination.serial < source.serial {
+        return Err(miette::miette!(
+            "The destination state does not contain the migrated source snapshot"
+        ));
+    }
+    Ok(())
+}
+
+fn destination_action(
+    source: &StateSnapshotMetadata,
+    destination: &StateSnapshot,
+) -> Result<DestinationAction> {
+    let StateSnapshot::Present(destination) = destination else {
+        return Ok(DestinationAction::Copy);
+    };
+    if destination.lineage != source.lineage {
+        return Err(miette::miette!(
+            "Destination state is non-empty and has unrelated lineage"
+        ));
+    }
+    if destination.serial == source.serial && destination.contents == source.contents {
+        return Ok(DestinationAction::Current);
+    }
+    Err(miette::miette!(
+        "Destination state does not exactly match the source snapshot"
+    ))
 }
 
 fn ensure_single_source(transitions: &[&ResourceTransition]) -> Result<()> {
@@ -627,10 +1227,15 @@ fn check_modules(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_history_target, run_from};
-    use crate::cli::{Cli, Commands, ModuleTarget, ModulesCommand, Target, TfmigrateCommand};
+    use super::{
+        DestinationAction, StateSnapshot, StateSnapshotMetadata, destination_action,
+        ensure_default_workspace, ensure_migrated_snapshot, ensure_module_migration_files,
+        inspected_backend, parse_history_target, run_from, state_snapshot_missing,
+    };
+    use crate::cli::{Cli, Commands, MigrationCommand, ModuleTarget, ModulesCommand, Target};
     use crate::test_support::TestDirectory;
     use miette::{IntoDiagnostic, Result};
+    use std::collections::BTreeMap;
     use std::fs::{self, File};
     use std::io::{self, Write};
     use std::os::unix::fs::PermissionsExt;
@@ -653,6 +1258,96 @@ mod tests {
                 command: ModulesCommand::List,
             },
         })
+    }
+
+    fn module_migration_cli(
+        root: &Path,
+        cue_bin: &Path,
+        tf_bin: &Path,
+        temp: &TestDirectory,
+        command: MigrationCommand,
+    ) -> Cli {
+        Cli {
+            verbose: false,
+            target: Some(Target {
+                module: ModuleTarget::WorkspaceRelative(PathBuf::from("new")),
+                environment: Some("prod".to_owned()),
+            }),
+            workspace: Some(root.to_owned()),
+            cue_path: Some(cue_bin.to_owned()),
+            tf_path: Some(tf_bin.to_owned()),
+            tfmigrate_path: Some(temp.path().join("missing-tfmigrate")),
+            use_local_backend: false,
+            command: Commands::Migrate { command },
+        }
+    }
+
+    fn write_module_migration_tools(
+        temp: &TestDirectory,
+    ) -> Result<(PathBuf, PathBuf, PathBuf, PathBuf)> {
+        let cue_bin = temp.path().join("cue");
+        let cue_marker = temp.path().join("cue-invocations");
+        write_executable(
+            &cue_bin,
+            &format!(
+                r#"#!/usr/bin/env bash
+set -euo pipefail
+expression=""
+output=""
+while [[ $# -gt 0 ]]; do
+	case $1 in
+	-e) expression=$2; shift 2 ;;
+	-o) output=$2; shift 2 ;;
+	*) shift ;;
+	esac
+done
+printf '%s\n' "$expression" >> '{}'
+if [[ $expression == *'#migration'* ]]; then
+	printf '{{"moduleHistory":["/old:prod"],"resourceTransitions":[]}}'
+	exit 0
+fi
+if [[ $expression == *'#backends'* ]]; then
+	config='{{"terraform":{{"backend":{{"local":{{"path":"historical.tfstate"}}}},"required_version":"0.12.0"}}}}'
+elif [[ $expression == *'localBackendOverride: "local.tfstate"'* ]]; then
+	config='{{"terraform":{{"backend":{{"local":{{"path":"local.tfstate"}}}},"required_providers":{{"example":{{"source":"example/example","version":"1.0.0"}}}}}},"resource":{{"terraform_data":{{"current":{{}}}}}},"output":{{"current":{{"value":"current"}}}}}}'
+else
+	config='{{"terraform":{{"backend":{{"local":{{"path":"destination.tfstate"}}}},"required_providers":{{"example":{{"source":"example/example","version":"1.0.0"}}}}}},"resource":{{"terraform_data":{{"current":{{}}}}}},"output":{{"current":{{"value":"current"}}}}}}'
+fi
+if [[ -n $output ]]; then
+	printf '%s' "$config" > "$output"
+else
+	printf '%s' "$config"
+fi
+"#,
+                cue_marker.display()
+            ),
+        )?;
+        let tf_bin = temp.path().join("tofu");
+        let tf_marker = temp.path().join("tofu-invocations");
+        write_executable(
+            &tf_bin,
+            &format!(
+                r#"#!/usr/bin/env bash
+set -euo pipefail
+if [[ $1 == init && ! -f .terraform.lock.hcl ]]; then
+	printf 'provider lock missing\n' >&2
+	exit 41
+fi
+printf '%s\n' "$*" >> '{}'
+if [[ $* == 'workspace list -no-color' ]]; then
+	printf '* default\n'
+elif [[ $* == 'state pull' ]]; then
+	if [[ $PWD == *.destination ]]; then
+		printf 'No state file was found!\n' >&2
+		exit 1
+	fi
+	printf '{{"lineage":"test-lineage","serial":1}}'
+fi
+"#,
+                tf_marker.display()
+            ),
+        )?;
+        Ok((cue_bin, cue_marker, tf_bin, tf_marker))
     }
 
     fn write_executable(path: &Path, body: &str) -> Result<()> {
@@ -711,6 +1406,144 @@ mod tests {
             ("infra/old".to_owned(), "dev".to_owned())
         );
         Ok(())
+    }
+
+    #[test]
+    fn test_module_migration_requires_only_default_workspace() {
+        ensure_default_workspace(b"* default\n").unwrap();
+
+        let error = ensure_default_workspace(b"* default\n  development\n")
+            .expect_err("additional workspaces should be rejected");
+
+        assert!(error.to_string().contains("default, development"));
+    }
+
+    #[test]
+    fn test_module_migration_requires_destination_snapshot() {
+        let source = StateSnapshotMetadata {
+            lineage: "source".to_owned(),
+            serial: 4,
+            contents: BTreeMap::new(),
+        };
+        let current_destination = StateSnapshotMetadata {
+            lineage: "source".to_owned(),
+            serial: 5,
+            contents: BTreeMap::new(),
+        };
+        let stale_destination = StateSnapshotMetadata {
+            lineage: "source".to_owned(),
+            serial: 3,
+            contents: BTreeMap::new(),
+        };
+
+        ensure_migrated_snapshot(&source, &current_destination).unwrap();
+        let error = ensure_migrated_snapshot(&source, &stale_destination)
+            .expect_err("stale destination should be rejected");
+
+        assert!(error.to_string().contains("migrated source snapshot"));
+    }
+
+    #[test]
+    fn test_module_migration_guards_destination_state() {
+        let source = StateSnapshotMetadata {
+            lineage: "source".to_owned(),
+            serial: 4,
+            contents: BTreeMap::new(),
+        };
+        let current = StateSnapshot::Present(StateSnapshotMetadata {
+            lineage: "source".to_owned(),
+            serial: 4,
+            contents: BTreeMap::new(),
+        });
+        let stale = StateSnapshot::Present(StateSnapshotMetadata {
+            lineage: "source".to_owned(),
+            serial: 3,
+            contents: BTreeMap::new(),
+        });
+        let unrelated = StateSnapshot::Present(StateSnapshotMetadata {
+            lineage: "other".to_owned(),
+            serial: 5,
+            contents: BTreeMap::new(),
+        });
+        let divergent = StateSnapshot::Present(StateSnapshotMetadata {
+            lineage: "source".to_owned(),
+            serial: 4,
+            contents: BTreeMap::from([("outputs".to_owned(), serde_json::json!({"x": 1}))]),
+        });
+
+        assert!(matches!(
+            destination_action(&source, &StateSnapshot::Missing).unwrap(),
+            DestinationAction::Copy
+        ));
+        assert!(destination_action(&source, &stale).is_err());
+        assert!(matches!(
+            destination_action(&source, &current).unwrap(),
+            DestinationAction::Current
+        ));
+        assert!(destination_action(&source, &unrelated).is_err());
+        assert!(destination_action(&source, &divergent).is_err());
+        assert!(state_snapshot_missing("Error: No state file was found!"));
+        assert!(!state_snapshot_missing("permission denied"));
+    }
+
+    #[test]
+    fn test_module_migration_checks_repository_files() -> Result<()> {
+        let temp = TestDirectory::new()?;
+        let source_lock = temp.path().join("old/.cuet/prod/.terraform.lock.hcl");
+        let destination_lock = temp.path().join("new/.cuet/prod/.terraform.lock.hcl");
+        let output_dir = temp.path().join("new/.cuet/prod");
+        let scratch_dir = temp.path().join("new/.cuet/prod.migrate");
+        fs::create_dir_all(
+            source_lock
+                .parent()
+                .expect("source lock should have parent"),
+        )
+        .into_diagnostic()?;
+        fs::write(&source_lock, "").into_diagnostic()?;
+
+        let lock_error = ensure_module_migration_files(
+            &source_lock,
+            &destination_lock,
+            &output_dir,
+            &scratch_dir,
+        )
+        .expect_err("historical lock should be rejected");
+        fs::remove_file(&source_lock).into_diagnostic()?;
+        fs::create_dir_all(&output_dir).into_diagnostic()?;
+        fs::write(output_dir.join("tfmigrate.json"), "").into_diagnostic()?;
+        let artifact_error = ensure_module_migration_files(
+            &source_lock,
+            &destination_lock,
+            &output_dir,
+            &scratch_dir,
+        )
+        .expect_err("tfmigrate artifact should be rejected");
+
+        assert!(lock_error.to_string().contains("move it"));
+        assert!(
+            artifact_error
+                .to_string()
+                .contains("Stale tfmigrate artifact")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_migration_inspection_redacts_backend_secrets() {
+        let config = serde_json::json!({
+            "terraform": {"backend": {"gcs": {
+                "bucket": "state",
+                "credentials": "secret-json",
+                "conn_str": "postgres://secret"
+            }}},
+        });
+
+        let (backend, complete) = inspected_backend(&config).unwrap();
+
+        assert!(complete);
+        assert_eq!(backend["gcs"]["bucket"], "state");
+        assert!(backend["gcs"].get("credentials").is_none());
+        assert!(backend["gcs"].get("conn_str").is_none());
     }
 
     #[test]
@@ -920,8 +1753,8 @@ cp "$2" '{}'
             tf_path: Some(tf_bin),
             tfmigrate_path: Some(tfmigrate_bin),
             use_local_backend: false,
-            command: Commands::Tfmigrate {
-                command: TfmigrateCommand::Plan { args: Vec::new() },
+            command: Commands::Migrate {
+                command: MigrationCommand::Plan { args: Vec::new() },
             },
         };
 
@@ -943,94 +1776,66 @@ cp "$2" '{}'
     }
 
     #[test]
-    fn test_tfmigrate_generates_backend_only_source_for_module_history() -> Result<()> {
+    fn test_module_migration_uses_native_backend_migration() -> Result<()> {
         let temp = TestDirectory::new()?;
         let root = temp.path().join("workspace");
         let module = root.join("new");
         fs::create_dir_all(&module).into_diagnostic()?;
         fs::write(root.join(".cuetroot.cue"), "").into_diagnostic()?;
         fs::write(module.join("cuet.cue"), "").into_diagnostic()?;
-        let cue_bin = temp.path().join("cue");
-        write_executable(
+        fs::create_dir_all(module.join(".cuet/prod")).into_diagnostic()?;
+        fs::write(
+            module.join(".cuet/prod/.terraform.lock.hcl"),
+            "# provider lock\n",
+        )
+        .into_diagnostic()?;
+        let (cue_bin, cue_marker, tf_bin, tf_marker) = write_module_migration_tools(&temp)?;
+        let cli = module_migration_cli(&root, &cue_bin, &tf_bin, &temp, MigrationCommand::Check);
+
+        let status = run_from(cli, temp.path(), &mut Vec::new())?;
+
+        assert!(status.is_none());
+        assert!(!tf_marker.exists());
+        let cli = module_migration_cli(
+            &root,
             &cue_bin,
-            r#"#!/usr/bin/env bash
-# Fake CUE returns module history and writes generated configurations.
-set -euo pipefail
-expression=""
-output=""
-while [[ $# -gt 0 ]]; do
-	case $1 in
-	-e)
-		expression=$2
-		shift 2
-		;;
-	-o)
-		output=$2
-		shift 2
-		;;
-	*) shift ;;
-	esac
-done
-if [[ $expression == *'#migration'* ]]; then
-	printf '{"moduleHistory":["/old:prod"],"resourceTransitions":[]}'
-	exit 0
-fi
-printf '{}' > "$output"
-"#,
-        )?;
-        let tf_bin = temp.path().join("tofu");
-        write_executable(
             &tf_bin,
-            "#!/usr/bin/env bash\n# Fake OpenTofu is resolved but run by tfmigrate.\nset -euo pipefail\n",
-        )?;
-        let tfmigrate_bin = temp.path().join("tfmigrate");
-        let migration_marker = temp.path().join("module-migration.json");
-        write_executable(
-            &tfmigrate_bin,
-            &format!(
-                r#"#!/usr/bin/env bash
-# Fake tfmigrate preserves the generated migration.
-set -euo pipefail
-cp "$2" '{}'
-"#,
-                migration_marker.display()
-            ),
-        )?;
-        let cli = Cli {
-            verbose: false,
-            target: Some(Target {
-                module: ModuleTarget::WorkspaceRelative(PathBuf::from("new")),
-                environment: Some("prod".to_owned()),
-            }),
-            workspace: Some(root),
-            cue_path: Some(cue_bin),
-            tf_path: Some(tf_bin),
-            tfmigrate_path: Some(tfmigrate_bin),
-            use_local_backend: false,
-            command: Commands::Tfmigrate {
-                command: TfmigrateCommand::Plan { args: Vec::new() },
-            },
-        };
+            &temp,
+            MigrationCommand::Plan { args: Vec::new() },
+        );
 
         let status = run_from(cli, temp.path(), &mut Vec::new())?
             .expect("migration should return its process status");
 
         assert!(status.success());
-        assert!(
-            module
-                .join(".cuet/prod/.tfmigrate/from/main.tf.json")
-                .is_file()
-        );
-        let migration: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(migration_marker).into_diagnostic()?)
-                .into_diagnostic()?;
         assert_eq!(
-            migration["migration"]["multi_state"]["cuet"]["actions"][0],
-            "xmv * $1"
+            fs::read_to_string(&tf_marker).into_diagnostic()?,
+            "init -input=false -lockfile=readonly\nworkspace list -no-color\nstate pull\ninit -migrate-state -force-copy -input=false -lockfile=readonly -lock-timeout=5m\nplan -detailed-exitcode -lock-timeout=5m\n"
         );
+        let cue_invocations = fs::read_to_string(cue_marker).into_diagnostic()?;
+        assert!(cue_invocations.contains(r#"#backends)["prod"]"#));
+        assert!(cue_invocations.contains(r#"module: "old""#));
+        assert!(!cue_invocations.contains("backendModule"));
+        assert!(!cue_invocations.contains("backendEnvironment"));
+        assert!(cue_invocations.contains(r#"localBackendOverride: "local.tfstate""#));
+        assert!(!module.join(".cuet/prod.migrate").exists());
+
+        fs::write(&tf_marker, "").into_diagnostic()?;
+        let cli = module_migration_cli(
+            &root,
+            &cue_bin,
+            &tf_bin,
+            &temp,
+            MigrationCommand::Apply { args: Vec::new() },
+        );
+
+        let status = run_from(cli, temp.path(), &mut Vec::new())?
+            .expect("migration should return its process status");
+
+        assert!(status.success());
         assert_eq!(
-            migration["migration"]["multi_state"]["cuet"]["from_skip_plan"],
-            true
+            fs::read_to_string(&tf_marker).into_diagnostic()?,
+            "init -input=false -lockfile=readonly\nworkspace list -no-color\nstate pull\ninit -migrate-state -force-copy -input=false -lockfile=readonly -lock-timeout=5m\nplan -detailed-exitcode -lock-timeout=5m\ninit -input=false -lockfile=readonly\nworkspace list -no-color\nstate pull\ninit -input=false -lockfile=readonly\nstate pull\ninit -migrate-state -lockfile=readonly -lock-timeout=5m\nstate pull\nplan -detailed-exitcode -lock-timeout=5m\n"
         );
         Ok(())
     }

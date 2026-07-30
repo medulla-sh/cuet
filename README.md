@@ -61,15 +61,17 @@ brew bundle
 ```
 
 Alternatively, install `just`, CUE, tfmigrate, and OpenTofu with another package
-manager and ensure they are available on `PATH`.
+manager and ensure they are available on `PATH`. tfmigrate is required only for
+partial cross-state resource moves.
 
 <details>
 <summary>Using your own CUE or Terraform/OpenTofu binaries</summary>
 
-`cuet` expects `cue` and `tofu` to be available on `PATH`, and migration commands
-also require `tfmigrate`. The CLI does not install or vendor these tools. Manage
-them with Homebrew, Nix, mise, asdf, manual downloads, or your team's existing
-toolchain.
+`cuet` expects `cue` and `tofu` to be available on `PATH`. Partial cross-state
+resource migrations also require `tfmigrate`; complete module migrations use
+native OpenTofu backend migration. The CLI does not install or vendor these
+tools. Manage them with Homebrew, Nix, mise, asdf, manual downloads, or your
+team's existing toolchain.
 
 Use `--cue-path` or `--tf-path` to point at alternate binaries, including
 Terraform instead of OpenTofu. Use `--tfmigrate-path` to select an alternate

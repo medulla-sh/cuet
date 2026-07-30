@@ -97,21 +97,6 @@ fn cue_export_file_command(
     Ok(process)
 }
 
-fn terraform_export_command(
-    cue_bin: &Path,
-    workspace: &Workspace,
-    env: &Env,
-    backend_override_value: &str,
-    output_file: &Path,
-) -> Result<Command> {
-    cue_export_file_command(
-        cue_bin,
-        workspace,
-        &export_expression(workspace, env, backend_override_value),
-        output_file,
-    )
-}
-
 fn terraform_command(tf_bin: &Path, output_dir: &Path, args: &[String]) -> Command {
     let mut process = Command::new(tf_bin);
     process
@@ -239,30 +224,169 @@ pub fn export_terraform(
     backend_override_value: &str,
 ) -> Result<(ExitStatus, PathBuf)> {
     let output_dir = workspace.target_dir().join(OUTPUT_FOLDER_NAME).join(env);
-    std::fs::create_dir_all(&output_dir)
-        .into_diagnostic()
-        .map_err(|error| miette::miette!("Failed to create output directory: {error}"))?;
-    ensure_no_tfmigrate_override(&output_dir)?;
-    let output_file = output_dir.join(OUTPUT_FILE_NAME);
-
-    let status = run_command(
+    let status = export_terraform_to(
         logger,
-        &mut terraform_export_command(
-            cue_bin,
-            workspace,
-            env,
-            backend_override_value,
-            &output_file,
-        )?,
+        workspace,
+        env,
+        cue_bin,
+        backend_override_value,
+        &output_dir,
     )?;
     Ok((status, output_dir))
 }
 
-pub fn read_tfmigrate_metadata(
+pub fn export_terraform_to(
+    logger: &Logger,
     workspace: &Workspace,
     env: &Env,
     cue_bin: &Path,
     backend_override_value: &str,
+    output_dir: &Path,
+) -> Result<ExitStatus> {
+    export_terraform_expression_to(
+        logger,
+        workspace,
+        cue_bin,
+        &export_expression(workspace, env, backend_override_value),
+        output_dir,
+    )
+}
+
+pub fn export_terraform_with_backend_to(
+    logger: &Logger,
+    workspace: &Workspace,
+    env: &Env,
+    backend_module: &str,
+    backend_environment: &Env,
+    cue_bin: &Path,
+    output_dir: &Path,
+) -> Result<ExitStatus> {
+    let status = export_terraform_to(logger, workspace, env, cue_bin, "null", output_dir)?;
+    if !status.success() {
+        return Ok(status);
+    }
+
+    let output_file = output_dir.join(OUTPUT_FILE_NAME);
+    let mut config: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&output_file)
+            .into_diagnostic()
+            .map_err(|error| miette::miette!("Failed to read Terraform configuration: {error}"))?,
+    )
+    .into_diagnostic()
+    .map_err(|error| miette::miette!("Failed to decode Terraform configuration: {error}"))?;
+    let historical = read_backend_config(workspace, backend_module, backend_environment, cue_bin)?;
+    replace_root_backend(&mut config, &historical)?;
+    let contents = serde_json::to_vec_pretty(&config).into_diagnostic()?;
+    std::fs::write(&output_file, contents)
+        .into_diagnostic()
+        .map_err(|error| miette::miette!("Failed to write Terraform configuration: {error}"))?;
+    Ok(status)
+}
+
+fn export_terraform_expression_to(
+    logger: &Logger,
+    workspace: &Workspace,
+    cue_bin: &Path,
+    expression: &str,
+    output_dir: &Path,
+) -> Result<ExitStatus> {
+    std::fs::create_dir_all(output_dir)
+        .into_diagnostic()
+        .map_err(|error| miette::miette!("Failed to create output directory: {error}"))?;
+    ensure_no_tfmigrate_override(output_dir)?;
+    let output_file = output_dir.join(OUTPUT_FILE_NAME);
+
+    run_command(
+        logger,
+        &mut cue_export_file_command(cue_bin, workspace, expression, &output_file)?,
+    )
+}
+
+pub fn run_tf_in(
+    logger: &Logger,
+    tf_bin: &Path,
+    output_dir: &Path,
+    args: &[&str],
+) -> Result<ExitStatus> {
+    let args: Vec<_> = args.iter().map(|argument| (*argument).to_owned()).collect();
+    run_command(logger, &mut terraform_command(tf_bin, output_dir, &args))
+}
+
+pub fn output_tf_in(
+    logger: &Logger,
+    tf_bin: &Path,
+    output_dir: &Path,
+    args: &[&str],
+) -> Result<Output> {
+    let args: Vec<_> = args.iter().map(|argument| (*argument).to_owned()).collect();
+    let mut command = terraform_command(tf_bin, output_dir, &args);
+    command.stdin(Stdio::null()).stdout(Stdio::piped());
+    log_command(logger, &command);
+    command.output().into_diagnostic()
+}
+
+pub fn capture_tf_in(
+    logger: &Logger,
+    tf_bin: &Path,
+    output_dir: &Path,
+    args: &[&str],
+) -> Result<Output> {
+    let args: Vec<_> = args.iter().map(|argument| (*argument).to_owned()).collect();
+    let mut command = terraform_command(tf_bin, output_dir, &args);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    log_command(logger, &command);
+    command.output().into_diagnostic()
+}
+
+pub fn read_migration_metadata(
+    workspace: &Workspace,
+    env: &Env,
+    cue_bin: &Path,
+    backend_override_value: &str,
+) -> Result<serde_json::Value> {
+    read_cue_json(
+        workspace,
+        cue_bin,
+        &migration_expression(workspace, env, backend_override_value),
+        "migration history",
+    )
+}
+
+pub fn read_backend_config(
+    workspace: &Workspace,
+    module: &str,
+    env: &Env,
+    cue_bin: &Path,
+) -> Result<serde_json::Value> {
+    read_cue_json(
+        workspace,
+        cue_bin,
+        &backend_expression(module, env, "null"),
+        "backend configuration",
+    )
+}
+
+pub fn read_terraform_config(
+    workspace: &Workspace,
+    env: &Env,
+    cue_bin: &Path,
+) -> Result<serde_json::Value> {
+    read_cue_json(
+        workspace,
+        cue_bin,
+        &export_expression(workspace, env, "null"),
+        "Terraform configuration",
+    )
+}
+
+fn read_cue_json(
+    workspace: &Workspace,
+    cue_bin: &Path,
+    expression: &str,
+    description: &str,
 ) -> Result<serde_json::Value> {
     let mut command = Command::new(cue_bin);
     command
@@ -270,7 +394,7 @@ pub fn read_tfmigrate_metadata(
         .arg("export")
         .arg(format!(".:{}", workspace.module_package()))
         .arg("-e")
-        .arg(migration_expression(workspace, env, backend_override_value))
+        .arg(expression)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -278,14 +402,63 @@ pub fn read_tfmigrate_metadata(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(miette::miette!(
-            "Failed to evaluate tfmigrate history: {}",
+            "Failed to evaluate {description}: {}",
             stderr.trim()
         ));
     }
 
     serde_json::from_slice(&output.stdout)
         .into_diagnostic()
-        .map_err(|error| miette::miette!("Failed to decode tfmigrate history: {error}"))
+        .map_err(|error| miette::miette!("Failed to decode {description}: {error}"))
+}
+
+pub fn replace_root_backend(
+    current: &mut serde_json::Value,
+    historical: &serde_json::Value,
+) -> Result<()> {
+    let historical_backend = root_backend(historical, "Historical backend configuration")?.clone();
+    validate_backend(&historical_backend, "Historical backend configuration")?;
+    let current_backend = root_backend_mut(current, "Terraform configuration")?;
+    validate_backend(current_backend, "Terraform configuration")?;
+    *current_backend = historical_backend;
+    Ok(())
+}
+
+fn root_backend<'a>(
+    config: &'a serde_json::Value,
+    description: &str,
+) -> Result<&'a serde_json::Value> {
+    config
+        .get("terraform")
+        .and_then(|terraform| terraform.get("backend"))
+        .ok_or_else(|| miette::miette!("{description} has no root backend"))
+}
+
+fn root_backend_mut<'a>(
+    config: &'a mut serde_json::Value,
+    description: &str,
+) -> Result<&'a mut serde_json::Value> {
+    config
+        .get_mut("terraform")
+        .and_then(|terraform| terraform.get_mut("backend"))
+        .ok_or_else(|| miette::miette!("{description} has no root backend"))
+}
+
+fn validate_backend(backend: &serde_json::Value, description: &str) -> Result<()> {
+    let backend = backend
+        .as_object()
+        .ok_or_else(|| miette::miette!("{description} root backend must be an object"))?;
+    if backend.len() != 1 {
+        return Err(miette::miette!(
+            "{description} must contain exactly one backend type"
+        ));
+    }
+    if !backend.values().all(serde_json::Value::is_object) {
+        return Err(miette::miette!(
+            "{description} backend settings must be an object"
+        ));
+    }
+    Ok(())
 }
 
 pub fn export_historical_backend(
@@ -354,6 +527,11 @@ fn ensure_no_tfmigrate_override(output_dir: &Path) -> Result<()> {
 }
 
 fn run_command(logger: &Logger, command: &mut Command) -> Result<ExitStatus> {
+    log_command(logger, command);
+    command.status().into_diagnostic()
+}
+
+fn log_command(logger: &Logger, command: &Command) {
     let program = command.get_program().to_str().unwrap();
     let args = command.get_args().map(|arg| arg.to_str().unwrap());
     let command_string = shell_words::join(std::iter::once(program).chain(args));
@@ -366,7 +544,6 @@ fn run_command(logger: &Logger, command: &mut Command) -> Result<ExitStatus> {
             .map_or(Cow::from("<None>"), Path::to_string_lossy),
         command_string
     );
-    command.status().into_diagnostic()
 }
 
 pub fn resolve_tool(path: &Path) -> Result<PathBuf> {
@@ -378,7 +555,8 @@ pub fn resolve_tool(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        OUTPUT_FOLDER_NAME, TERRAFORM_INIT_STATE_FILE, cue_command, run_tf, run_tfmigrate,
+        OUTPUT_FOLDER_NAME, TERRAFORM_INIT_STATE_FILE, cue_command, replace_root_backend, run_tf,
+        run_tfmigrate,
     };
     use crate::cli::{CueCommand, ModuleTarget};
     use crate::logger::Logger;
@@ -440,6 +618,68 @@ mod tests {
             .map(OsStr::new)
         );
         Ok(())
+    }
+
+    #[test]
+    fn test_replace_root_backend_changes_only_backend() -> Result<()> {
+        let mut current = serde_json::json!({
+            "terraform": {
+                "backend": {"gcs": {"bucket": "new", "prefix": "new/path"}},
+                "required_version": "~> 1.9",
+                "required_providers": {"example": {"source": "example/example"}}
+            },
+            "provider": {"example": {"region": "current"}},
+            "resource": {"terraform_data": {"current": {}}},
+            "data": {"terraform_remote_state": {"dependency": {"config": {"prefix": "current"}}}},
+            "output": {"value": {"value": "current"}}
+        });
+        let historical = serde_json::json!({
+            "terraform": {
+                "required_version": "~> 0.12",
+                "backend": {
+                    "remote": {
+                        "hostname": "app.terraform.io",
+                        "organization": "example",
+                        "workspaces": {"name": "historical"}
+                    }
+                }
+            }
+        });
+        let expected = serde_json::json!({
+            "terraform": {
+                "backend": {
+                    "remote": {
+                        "hostname": "app.terraform.io",
+                        "organization": "example",
+                        "workspaces": {"name": "historical"}
+                    }
+                },
+                "required_version": "~> 1.9",
+                "required_providers": {"example": {"source": "example/example"}}
+            },
+            "provider": {"example": {"region": "current"}},
+            "resource": {"terraform_data": {"current": {}}},
+            "data": {"terraform_remote_state": {"dependency": {"config": {"prefix": "current"}}}},
+            "output": {"value": {"value": "current"}}
+        });
+
+        replace_root_backend(&mut current, &historical)?;
+
+        assert_eq!(current, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn test_replace_root_backend_rejects_multiple_backend_types() {
+        let mut current = serde_json::json!({"terraform": {"backend": {"local": {}}}});
+        let historical = serde_json::json!({
+            "terraform": {"backend": {"gcs": {}, "s3": {}}}
+        });
+
+        let error = replace_root_backend(&mut current, &historical)
+            .expect_err("multiple backend types should be rejected");
+
+        assert!(error.to_string().contains("exactly one backend type"));
     }
 
     #[test]
