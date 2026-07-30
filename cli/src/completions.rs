@@ -247,8 +247,7 @@ mod tests {
     use crate::test_support::TestDirectory;
     use miette::{IntoDiagnostic, Result};
     use std::ffi::OsStr;
-    use std::fs::{self, File};
-    use std::io::Write;
+    use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
@@ -281,12 +280,14 @@ mod tests {
         fs::write(root.join(".cuetroot.cue"), "").into_diagnostic()?;
         fs::write(module.join("cuet.cue"), "").into_diagnostic()?;
         let cue = temp.path().join("cue");
-        let mut file = File::create(&cue).into_diagnostic()?;
-        file.write_all(b"#!/usr/bin/env bash\nprintf '[\"prod\",\"dev\",\"stage\"]'\n")
-            .into_diagnostic()?;
-        file.sync_all().into_diagnostic()?;
-        drop(file);
-        fs::set_permissions(&cue, fs::Permissions::from_mode(0o755)).into_diagnostic()?;
+        let pending_cue = temp.path().join("cue.tmp");
+        fs::write(
+            &pending_cue,
+            b"#!/usr/bin/env bash\nprintf '[\"prod\",\"dev\",\"stage\"]'\n",
+        )
+        .into_diagnostic()?;
+        fs::set_permissions(&pending_cue, fs::Permissions::from_mode(0o755)).into_diagnostic()?;
+        fs::rename(pending_cue, &cue).into_diagnostic()?;
 
         let values = target_values("/infra/neon:d", &root, &cue)?;
 
