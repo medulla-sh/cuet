@@ -412,6 +412,12 @@ _#GenerateProviders: {
 	in:               #TerraformInput
 
 	out: #TerraformOutput & {
+		let bootstrapContext = {bootstrap: {
+			#module:         in.#module
+			#backendConfigs: in.#backendConfigs
+			#envName:        in.#envName
+			#env:            in.#env
+		}}
 		let directProviders = {
 			for source in [if in.resource != _|_ {in.resource}, if in.data != _|_ {in.data}]
 			for sourceName, blocks in source
@@ -432,8 +438,8 @@ _#GenerateProviders: {
 				let registration = providerRegistry[providerName]
 				let providerBlocks = [
 					for alias, _ in aliases {[
-						if alias == _#DefaultProviderAlias {registration.default},
-						registration.aliases[alias] & {"alias": alias},
+						if alias == _#DefaultProviderAlias {registration.default & bootstrapContext},
+						registration.aliases[alias] & {"alias": alias} & bootstrapContext,
 					][0]},
 				]
 
@@ -482,8 +488,8 @@ _#GenerateProviders: {
 				let registration = providerRegistry[providerName]
 				let providerBlocks = [
 					for alias, _ in aliases {[
-						if alias == _#DefaultProviderAlias {registration.default},
-						registration.aliases[alias] & {provider: "alias": alias},
+						if alias == _#DefaultProviderAlias {registration.default & bootstrapContext},
+						registration.aliases[alias] & {provider: "alias": alias} & bootstrapContext,
 					][0]},
 				]
 
@@ -521,18 +527,13 @@ _#GenerateProviders: {
 
 			let providerBlocks = [
 				for alias, _ in aliases {[
-					if alias == _#DefaultProviderAlias {registration.default},
-					registration.aliases[alias] & {provider: "alias": alias},
+					if alias == _#DefaultProviderAlias {registration.default & bootstrapContext},
+					registration.aliases[alias] & {provider: "alias": alias} & bootstrapContext,
 				][0]},
 			]
 
 			for block in providerBlocks {
-				(_#RenderTerraformInput & {in: block.bootstrap & {
-					#module:         in.#module
-					#backendConfigs: in.#backendConfigs
-					#envName:        in.#envName
-					#env:            in.#env
-				}}).out
+				(_#RenderTerraformInput & {in: block.bootstrap}).out
 			}
 			"provider": (providerName): [for block in providerBlocks {block.provider}]
 		}
