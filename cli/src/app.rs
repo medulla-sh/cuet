@@ -22,6 +22,7 @@ use std::path::Component;
 use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::thread;
+use std::time::Duration;
 
 const DEFAULT_CUE_BIN: &str = "cue";
 const DEFAULT_TF_BIN: &str = "tofu";
@@ -35,6 +36,7 @@ struct TargetInvocation {
     cue_path: Option<PathBuf>,
     tf_path: Option<PathBuf>,
     tfmigrate_path: Option<PathBuf>,
+    timeout: Option<Duration>,
     use_local_backend: bool,
     command: Commands,
 }
@@ -56,6 +58,7 @@ fn run_from(
         cue_path,
         tf_path,
         tfmigrate_path,
+        timeout,
         use_local_backend,
         command,
     } = cli;
@@ -91,6 +94,7 @@ fn run_from(
             cue_path,
             tf_path,
             tfmigrate_path,
+            timeout,
             use_local_backend,
             command,
         },
@@ -177,6 +181,7 @@ fn run_target_command(
                 cue_bin: &cue_bin,
                 tf_bin: tf_bin.as_deref(),
                 tfmigrate_path: invocation.tfmigrate_path.as_deref(),
+                timeout: invocation.timeout,
                 backend_override_value: &backend_override_value,
             }
             .run(&command)
@@ -222,7 +227,8 @@ fn run_terraform_target(
         selected_env = environment::select(environments)?;
         &selected_env
     };
-    let reconciliation = reconciliation::inspect(logger, workspace, &tf_bin, env)?;
+    let reconciliation =
+        reconciliation::inspect(logger, workspace, &tf_bin, env, invocation.timeout)?;
     if !desired_environments.contains(env) && reconciliation.is_none() {
         reconciliation::remove_local(workspace, env)?;
         return Err(miette::miette!(
@@ -235,13 +241,22 @@ fn run_terraform_target(
         backend_override_value,
         reconciliation: reconciliation.as_ref(),
     };
-    let status = run_tf_with_metadata(logger, workspace, env, cue_bin, &tf_bin, &metadata, args)?;
+    let status = run_tf_with_metadata(
+        logger,
+        workspace,
+        env,
+        cue_bin,
+        &tf_bin,
+        &metadata,
+        args,
+        invocation.timeout,
+    )?;
     let command = args.iter().find(|argument| !argument.starts_with('-'));
     if status.success()
         && !desired_environments.contains(env)
         && command.is_some_and(|command| matches!(command.as_str(), "apply" | "destroy"))
     {
-        reconciliation::remove_if_empty(logger, workspace, &tf_bin, env)?;
+        reconciliation::remove_if_empty(logger, workspace, &tf_bin, env, invocation.timeout)?;
     }
     Ok(Some(status))
 }
@@ -362,6 +377,7 @@ struct MigrationRunner<'a> {
     cue_bin: &'a std::path::Path,
     tf_bin: Option<&'a std::path::Path>,
     tfmigrate_path: Option<&'a std::path::Path>,
+    timeout: Option<Duration>,
     backend_override_value: &'a str,
 }
 
@@ -448,6 +464,7 @@ impl MigrationRunner<'_> {
             args,
             &destination_dir,
             &migration,
+            self.timeout,
         )
         .map(Some)
     }
@@ -634,6 +651,7 @@ impl MigrationRunner<'_> {
                 self.tf_bin()?,
                 destination_dir.path(),
                 &["plan", "-detailed-exitcode", "-lock-timeout=5m"],
+                self.timeout,
             );
         }
         let status = export_terraform_to(
@@ -657,6 +675,7 @@ impl MigrationRunner<'_> {
                 "-lockfile=readonly",
                 "-lock-timeout=5m",
             ],
+            self.timeout,
         )?;
         if !status.success() {
             return Ok(status);
@@ -666,6 +685,7 @@ impl MigrationRunner<'_> {
             self.tf_bin()?,
             migration_dir,
             &["state", "pull"],
+            self.timeout,
         )?;
         if !destination_state.status.success() {
             return Ok(destination_state.status);
@@ -677,6 +697,7 @@ impl MigrationRunner<'_> {
             self.tf_bin()?,
             migration_dir,
             &["plan", "-detailed-exitcode", "-lock-timeout=5m"],
+            self.timeout,
         )
     }
 
@@ -722,6 +743,7 @@ impl MigrationRunner<'_> {
                 "-lockfile=readonly",
                 "-lock-timeout=5m",
             ],
+            self.timeout,
         )?;
         if !status.success() {
             return Ok(status);
@@ -731,6 +753,7 @@ impl MigrationRunner<'_> {
             self.tf_bin()?,
             migration_dir,
             &["plan", "-detailed-exitcode", "-lock-timeout=5m"],
+            self.timeout,
         )
     }
 
@@ -755,11 +778,18 @@ impl MigrationRunner<'_> {
             self.tf_bin()?,
             destination_dir,
             &["init", "-input=false", "-lockfile=readonly"],
+            self.timeout,
         )
     }
 
     fn read_state_snapshot(&self, directory: &std::path::Path) -> Result<StateSnapshot> {
-        let output = capture_tf_in(self.logger, self.tf_bin()?, directory, &["state", "pull"])?;
+        let output = capture_tf_in(
+            self.logger,
+            self.tf_bin()?,
+            directory,
+            &["state", "pull"],
+            self.timeout,
+        )?;
         if output.status.success() {
             return state_snapshot_metadata(&output.stdout).map(StateSnapshot::Present);
         }
@@ -800,6 +830,7 @@ impl MigrationRunner<'_> {
             self.tf_bin()?,
             migration_dir,
             &["init", "-input=false", "-lockfile=readonly"],
+            self.timeout,
         )?;
         if !status.success() {
             return Ok(status);
@@ -809,6 +840,7 @@ impl MigrationRunner<'_> {
             self.tf_bin()?,
             migration_dir,
             &["workspace", "list", "-no-color"],
+            self.timeout,
         )?;
         if !workspaces.status.success() {
             return Ok(workspaces.status);
@@ -1309,6 +1341,7 @@ mod tests {
             cue_path: Some(temp.path().join("missing-cue")),
             tf_path: Some(temp.path().join("missing-tofu")),
             tfmigrate_path: Some(temp.path().join("missing-tfmigrate")),
+            timeout: None,
             use_local_backend: false,
             command: Commands::Modules {
                 command: ModulesCommand::List,
@@ -1333,6 +1366,7 @@ mod tests {
             cue_path: Some(cue_bin.to_owned()),
             tf_path: Some(tf_bin.to_owned()),
             tfmigrate_path: Some(temp.path().join("missing-tfmigrate")),
+            timeout: None,
             use_local_backend: false,
             command: Commands::Migrate { command },
         }
@@ -1476,6 +1510,7 @@ esac
             cue_path: Some(cue_bin),
             tf_path: Some(tf_bin),
             tfmigrate_path: None,
+            timeout: None,
             use_local_backend: false,
             command: Commands::Tf {
                 args: vec!["apply".to_owned()],
@@ -1539,6 +1574,7 @@ if [[ $* == 'output -json' ]]; then printf '{{}}'; fi
             cue_path: Some(cue_bin),
             tf_path: Some(tf_bin),
             tfmigrate_path: None,
+            timeout: None,
             use_local_backend: false,
             command: Commands::Tf {
                 args: vec!["plan".to_owned()],
@@ -1587,6 +1623,7 @@ if [[ $* == 'output -json' ]]; then printf '{{}}'; fi
             cue_path: Some(PathBuf::from("/missing-cue")),
             tf_path: Some(PathBuf::from("/missing-tofu")),
             tfmigrate_path: Some(PathBuf::from("/missing-tfmigrate")),
+            timeout: None,
             use_local_backend: false,
             command: Commands::Version,
         };
@@ -1833,6 +1870,7 @@ fi
             cue_path: Some(cue_bin),
             tf_path: Some(temp.path().join("missing-tofu")),
             tfmigrate_path: Some(temp.path().join("missing-tfmigrate")),
+            timeout: None,
             use_local_backend: false,
             command: Commands::Modules {
                 command: ModulesCommand::Check,
@@ -1959,6 +1997,7 @@ cp "$2" '{}'
             cue_path: Some(cue_bin),
             tf_path: Some(tf_bin),
             tfmigrate_path: Some(tfmigrate_bin),
+            timeout: None,
             use_local_backend: false,
             command: Commands::Migrate {
                 command: MigrationCommand::Plan { args: Vec::new() },

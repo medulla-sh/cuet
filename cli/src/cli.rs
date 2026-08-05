@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand, ValueHint};
 use clap_complete::engine::ArgValueCompleter;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::time::Duration;
 
 #[derive(Parser, Debug)]
 #[command(name = "cuet")]
@@ -41,6 +42,10 @@ pub struct Cli {
     /// Path to the 'tfmigrate' binary
     #[arg(long, value_hint = ValueHint::ExecutablePath)]
     pub tfmigrate_path: Option<PathBuf>,
+
+    /// Maximum duration for `OpenTofu` operations. Remote-state reads default to 30s.
+    #[arg(long, global = true, value_name = "DURATION", value_parser = humantime::parse_duration)]
+    pub timeout: Option<Duration>,
 
     /// If set, will override to use a local backend instead of the framework configured backend.
     /// This is useful when creating a backend for the first time.
@@ -224,6 +229,7 @@ mod tests {
     use clap::error::ErrorKind;
     use clap_complete::Shell;
     use std::path::PathBuf;
+    use std::time::Duration;
 
     #[test]
     fn test_cli_parses_cue_arguments() {
@@ -277,6 +283,13 @@ mod tests {
             panic!("expected tf command");
         };
         assert_eq!(args, ["plan", "-target=google_project.main"]);
+    }
+
+    #[test]
+    fn test_cli_parses_timeout() {
+        let cli = Cli::try_parse_from(["cuet", "--timeout", "250ms", "tf", "output"]).unwrap();
+
+        assert_eq!(cli.timeout, Some(Duration::from_millis(250)));
     }
 
     #[test]

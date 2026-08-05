@@ -5,15 +5,39 @@ use crate::workspace::Workspace;
 use miette::{IntoDiagnostic, Result};
 use std::borrow::Cow;
 use std::io;
+use std::io::Read;
 use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+use wait_timeout::ChildExt;
 
 const OUTPUT_FOLDER_NAME: &str = ".cuet";
 const OUTPUT_FILE_NAME: &str = "main.tf.json";
 const TFMIGRATE_FILE_NAME: &str = "tfmigrate.json";
 const TERRAFORM_INIT_STATE_FILE: &str = ".terraform/terraform.tfstate";
 const TFMIGRATE_OVERRIDE_FILE: &str = "_tfmigrate_override.tf";
+const DEFAULT_TERRAFORM_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Clone, Copy)]
+struct CommandTimeout {
+    duration: Duration,
+    started: Instant,
+}
+
+impl CommandTimeout {
+    fn new(duration: Duration) -> Self {
+        Self {
+            duration,
+            started: Instant::now(),
+        }
+    }
+
+    fn remaining(self) -> Duration {
+        self.duration.saturating_sub(self.started.elapsed())
+    }
+}
 
 pub struct TerraformMetadata<'a> {
     pub backend_override_value: &'a str,
@@ -170,6 +194,34 @@ fn terraform_subcommand(args: &[String]) -> Option<(usize, &str)> {
         .map(|(index, argument)| (index, argument.as_str()))
 }
 
+fn terraform_timeout(args: &[String], explicit: Option<Duration>) -> Option<Duration> {
+    explicit
+        .or_else(|| terraform_reads_remote_state(args).then_some(DEFAULT_TERRAFORM_READ_TIMEOUT))
+}
+
+pub(crate) fn terraform_read_timeout(explicit: Option<Duration>) -> Duration {
+    explicit.unwrap_or(DEFAULT_TERRAFORM_READ_TIMEOUT)
+}
+
+fn terraform_reads_remote_state(args: &[String]) -> bool {
+    let Some((index, command)) = terraform_subcommand(args) else {
+        return false;
+    };
+    match command {
+        "output" => true,
+        "show" => terraform_subcommand(&args[index + 1..]).is_none(),
+        "state" => matches!(
+            terraform_subcommand(&args[index + 1..]).map(|(_, command)| command),
+            Some("list" | "pull" | "show")
+        ),
+        "workspace" => matches!(
+            terraform_subcommand(&args[index + 1..]).map(|(_, command)| command),
+            Some("list" | "show")
+        ),
+        _ => false,
+    }
+}
+
 fn terraform_initialized(output_dir: &Path, global_args: &[String]) -> bool {
     let working_dir = global_args
         .iter()
@@ -221,6 +273,7 @@ pub fn check_cue_export(
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub fn run_tf(
     logger: &Logger,
     workspace: &Workspace,
@@ -229,6 +282,7 @@ pub fn run_tf(
     tf_bin: &Path,
     backend_override_value: &str,
     args: &[String],
+    timeout: Option<Duration>,
 ) -> Result<ExitStatus> {
     run_tf_with_metadata(
         logger,
@@ -241,9 +295,11 @@ pub fn run_tf(
             reconciliation: None,
         },
         args,
+        timeout,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_tf_with_metadata(
     logger: &Logger,
     workspace: &Workspace,
@@ -252,6 +308,7 @@ pub fn run_tf_with_metadata(
     tf_bin: &Path,
     metadata: &TerraformMetadata<'_>,
     args: &[String],
+    timeout: Option<Duration>,
 ) -> Result<ExitStatus> {
     let (export_status, output_dir) = export_reconciled_terraform(
         logger,
@@ -265,20 +322,26 @@ pub fn run_tf_with_metadata(
         return Ok(export_status);
     }
 
+    let timeout = terraform_timeout(args, timeout).map(CommandTimeout::new);
     if let Some((index, command)) = terraform_subcommand(args)
         && command != "init"
         && !terraform_initialized(&output_dir, &args[..index])
     {
-        let init_status = run_command(
+        let init_status = run_command_with_timeout(
             logger,
             &mut terraform_init_command(tf_bin, &output_dir, &args[..index])?,
+            timeout,
         )?;
         if !init_status.success() {
             return Ok(init_status);
         }
     }
 
-    run_command(logger, &mut terraform_command(tf_bin, &output_dir, args))
+    run_command_with_timeout(
+        logger,
+        &mut terraform_command(tf_bin, &output_dir, args),
+        timeout,
+    )
 }
 
 fn export_reconciled_terraform(
@@ -391,9 +454,14 @@ pub fn run_tf_in(
     tf_bin: &Path,
     output_dir: &Path,
     args: &[&str],
+    timeout: Option<Duration>,
 ) -> Result<ExitStatus> {
     let args: Vec<_> = args.iter().map(|argument| (*argument).to_owned()).collect();
-    run_command(logger, &mut terraform_command(tf_bin, output_dir, &args))
+    run_command_with_timeout(
+        logger,
+        &mut terraform_command(tf_bin, output_dir, &args),
+        timeout.map(CommandTimeout::new),
+    )
 }
 
 pub fn output_tf_in(
@@ -401,12 +469,12 @@ pub fn output_tf_in(
     tf_bin: &Path,
     output_dir: &Path,
     args: &[&str],
+    timeout: Option<Duration>,
 ) -> Result<Output> {
     let args: Vec<_> = args.iter().map(|argument| (*argument).to_owned()).collect();
     let mut command = terraform_command(tf_bin, output_dir, &args);
     command.stdin(Stdio::null()).stdout(Stdio::piped());
-    log_command(logger, &command);
-    command.output().into_diagnostic()
+    output_command(logger, &mut command, timeout.map(CommandTimeout::new))
 }
 
 pub fn capture_tf_in(
@@ -414,6 +482,7 @@ pub fn capture_tf_in(
     tf_bin: &Path,
     output_dir: &Path,
     args: &[&str],
+    timeout: Option<Duration>,
 ) -> Result<Output> {
     let args: Vec<_> = args.iter().map(|argument| (*argument).to_owned()).collect();
     let mut command = terraform_command(tf_bin, output_dir, &args);
@@ -421,8 +490,7 @@ pub fn capture_tf_in(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    log_command(logger, &command);
-    command.output().into_diagnostic()
+    output_command(logger, &mut command, timeout.map(CommandTimeout::new))
 }
 
 pub fn read_migration_metadata(
@@ -570,6 +638,7 @@ pub fn export_historical_backend(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_tfmigrate(
     logger: &Logger,
     tfmigrate_bin: &Path,
@@ -578,6 +647,7 @@ pub fn run_tfmigrate(
     args: &[String],
     output_dir: &Path,
     migration: &serde_json::Value,
+    timeout: Option<Duration>,
 ) -> Result<ExitStatus> {
     let contents = serde_json::to_vec_pretty(&migration).into_diagnostic()?;
     let migration_file = output_dir.join(TFMIGRATE_FILE_NAME);
@@ -596,7 +666,7 @@ pub fn run_tfmigrate(
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
 
-    run_command(logger, &mut command)
+    run_command_with_timeout(logger, &mut command, timeout.map(CommandTimeout::new))
 }
 
 fn ensure_no_tfmigrate_override(output_dir: &Path) -> Result<()> {
@@ -615,18 +685,98 @@ fn run_command(logger: &Logger, command: &mut Command) -> Result<ExitStatus> {
     command.status().into_diagnostic()
 }
 
-fn log_command(logger: &Logger, command: &Command) {
+fn run_command_with_timeout(
+    logger: &Logger,
+    command: &mut Command,
+    timeout: Option<CommandTimeout>,
+) -> Result<ExitStatus> {
+    let Some(timeout) = timeout else {
+        return run_command(logger, command);
+    };
+    log_command(logger, command);
+    let command_string = command_string(command);
+    let mut child = command.spawn().into_diagnostic()?;
+    let Some(status) = child.wait_timeout(timeout.remaining()).into_diagnostic()? else {
+        child.kill().into_diagnostic()?;
+        child.wait().into_diagnostic()?;
+        return Err(miette::miette!(
+            "Command timed out after {}: {command_string}",
+            humantime::format_duration(timeout.duration)
+        ));
+    };
+    Ok(status)
+}
+
+fn output_command(
+    logger: &Logger,
+    command: &mut Command,
+    timeout: Option<CommandTimeout>,
+) -> Result<Output> {
+    let Some(timeout) = timeout else {
+        log_command(logger, command);
+        return command.output().into_diagnostic();
+    };
+    log_command(logger, command);
+    let command_string = command_string(command);
+    let mut child = command.spawn().into_diagnostic()?;
+    let stdout = child.stdout.take().map(|mut stdout| {
+        thread::spawn(move || {
+            let mut output = Vec::new();
+            stdout.read_to_end(&mut output).map(|_| output)
+        })
+    });
+    let stderr = child.stderr.take().map(|mut stderr| {
+        thread::spawn(move || {
+            let mut output = Vec::new();
+            stderr.read_to_end(&mut output).map(|_| output)
+        })
+    });
+    let (status, timed_out) =
+        if let Some(status) = child.wait_timeout(timeout.remaining()).into_diagnostic()? {
+            (status, false)
+        } else {
+            child.kill().into_diagnostic()?;
+            (child.wait().into_diagnostic()?, true)
+        };
+    let stdout = join_output(stdout)?;
+    let stderr = join_output(stderr)?;
+    if timed_out {
+        return Err(miette::miette!(
+            "Command timed out after {}: {command_string}",
+            humantime::format_duration(timeout.duration)
+        ));
+    }
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn join_output(handle: Option<thread::JoinHandle<io::Result<Vec<u8>>>>) -> Result<Vec<u8>> {
+    let Some(handle) = handle else {
+        return Ok(Vec::new());
+    };
+    handle
+        .join()
+        .map_err(|_| miette::miette!("Command output reader panicked"))?
+        .into_diagnostic()
+}
+
+fn command_string(command: &Command) -> String {
     let program = command.get_program().to_str().unwrap();
     let args = command.get_args().map(|arg| arg.to_str().unwrap());
-    let command_string = shell_words::join(std::iter::once(program).chain(args));
+    shell_words::join(std::iter::once(program).chain(args))
+}
 
+fn log_command(logger: &Logger, command: &Command) {
     info!(
         logger,
         "From: {}\n   Running: {}",
         command
             .get_current_dir()
             .map_or(Cow::from("<None>"), Path::to_string_lossy),
-        command_string
+        command_string(command)
     );
 }
 
@@ -639,8 +789,9 @@ pub fn resolve_tool(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        OUTPUT_FOLDER_NAME, TERRAFORM_INIT_STATE_FILE, cue_command, reconciled_export_expression,
-        replace_root_backend, run_tf, run_tfmigrate,
+        CommandTimeout, DEFAULT_TERRAFORM_READ_TIMEOUT, OUTPUT_FOLDER_NAME,
+        TERRAFORM_INIT_STATE_FILE, cue_command, output_command, reconciled_export_expression,
+        replace_root_backend, run_command_with_timeout, run_tf, run_tfmigrate, terraform_timeout,
     };
     use crate::cli::{CueCommand, ModuleTarget};
     use crate::logger::Logger;
@@ -653,6 +804,8 @@ mod tests {
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
 
     fn write_executable(path: &Path, body: &str) -> Result<()> {
         let mut file = File::create(path).into_diagnostic()?;
@@ -791,6 +944,93 @@ mod tests {
     }
 
     #[test]
+    fn test_terraform_reads_default_to_thirty_seconds() {
+        for args in [
+            vec!["output".to_owned(), "-json".to_owned()],
+            vec!["show".to_owned()],
+            vec!["state".to_owned(), "pull".to_owned()],
+            vec!["state".to_owned(), "list".to_owned()],
+            vec!["state".to_owned(), "show".to_owned()],
+            vec!["workspace".to_owned(), "list".to_owned()],
+            vec!["workspace".to_owned(), "show".to_owned()],
+        ] {
+            assert_eq!(
+                terraform_timeout(&args, None),
+                Some(DEFAULT_TERRAFORM_READ_TIMEOUT)
+            );
+        }
+    }
+
+    #[test]
+    fn test_terraform_writes_preserve_tool_defaults() {
+        for args in [
+            vec!["init".to_owned()],
+            vec!["plan".to_owned()],
+            vec!["apply".to_owned()],
+            vec!["show".to_owned(), "saved.tfplan".to_owned()],
+        ] {
+            assert_eq!(terraform_timeout(&args, None), None);
+        }
+    }
+
+    #[test]
+    fn test_explicit_timeout_overrides_command_policy() {
+        let timeout = Duration::from_millis(275);
+
+        assert_eq!(
+            terraform_timeout(&["output".to_owned()], Some(timeout)),
+            Some(timeout)
+        );
+        assert_eq!(
+            terraform_timeout(&["apply".to_owned()], Some(timeout)),
+            Some(timeout)
+        );
+    }
+
+    #[test]
+    fn test_command_timeout_kills_and_reaps_process() -> Result<()> {
+        let temp = TestDirectory::new()?;
+        let executable = temp.path().join("slow-command");
+        write_executable(&executable, "#!/bin/sh\nexec sleep 10\n")?;
+        let mut command = Command::new(executable);
+        let started = Instant::now();
+
+        let error = run_command_with_timeout(
+            &Logger::new(false),
+            &mut command,
+            Some(CommandTimeout::new(Duration::from_millis(25))),
+        )
+        .expect_err("slow process should time out");
+
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let message = error.to_string();
+        assert!(message.contains("timed out after 25ms"), "{message}");
+        Ok(())
+    }
+
+    #[test]
+    fn test_output_timeout_kills_and_reaps_process() -> Result<()> {
+        let temp = TestDirectory::new()?;
+        let executable = temp.path().join("slow-command");
+        write_executable(&executable, "#!/bin/sh\nprintf output\nexec sleep 10\n")?;
+        let mut command = Command::new(executable);
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let started = Instant::now();
+
+        let error = output_command(
+            &Logger::new(false),
+            &mut command,
+            Some(CommandTimeout::new(Duration::from_millis(25))),
+        )
+        .expect_err("slow process should time out");
+
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let message = error.to_string();
+        assert!(message.contains("timed out after 25ms"), "{message}");
+        Ok(())
+    }
+
+    #[test]
     fn test_tfmigrate_receives_multi_state_migration() -> Result<()> {
         let temp = TestDirectory::new()?;
         let tfmigrate_bin = temp.path().join("tfmigrate");
@@ -831,6 +1071,7 @@ cp "$3" '{}'
             &["--out=migration.tfplan".to_owned()],
             &output_dir,
             &migration,
+            None,
         )?;
 
         assert!(status.success());
@@ -874,6 +1115,7 @@ cp "$3" '{}'
             &tf_bin,
             "null",
             &["plan".to_owned()],
+            None,
         )?;
 
         assert_eq!(status.code(), Some(23));
@@ -902,6 +1144,7 @@ cp "$3" '{}'
             &tf_bin,
             "null",
             &["plan".to_owned()],
+            None,
         )?;
 
         assert_eq!(status.code(), Some(19));
@@ -933,6 +1176,7 @@ cp "$3" '{}'
             &tf_bin,
             "null",
             &["output".to_owned(), "-json".to_owned()],
+            None,
         )?;
         let output_dir = workspace.target_dir().join(OUTPUT_FOLDER_NAME).join(&env);
         let init_state = output_dir.join(TERRAFORM_INIT_STATE_FILE);
@@ -947,6 +1191,7 @@ cp "$3" '{}'
             &tf_bin,
             "null",
             &["output".to_owned(), "-json".to_owned()],
+            None,
         )?;
 
         assert!(fresh_status.success());
@@ -955,6 +1200,40 @@ cp "$3" '{}'
             fs::read_to_string(tf_marker).into_diagnostic()?,
             "init\noutput -json\noutput -json\n"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_terraform_timeout_includes_automatic_init() -> Result<()> {
+        let temp = TestDirectory::new()?;
+        let cue_bin = temp.path().join("cue");
+        let tf_bin = temp.path().join("tofu");
+        let tf_marker = temp.path().join("tofu-ran");
+        write_executable(&cue_bin, "#!/bin/sh\nexit 0\n")?;
+        write_executable(
+            &tf_bin,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexec sleep 10\n",
+                tf_marker.display()
+            ),
+        )?;
+        let workspace = test_workspace(&temp)?;
+        let env = "dev".to_owned();
+
+        let error = run_tf(
+            &Logger::new(false),
+            &workspace,
+            &env,
+            &cue_bin,
+            &tf_bin,
+            "null",
+            &["output".to_owned(), "-json".to_owned()],
+            Some(Duration::from_millis(25)),
+        )
+        .expect_err("automatic init should share the invocation timeout");
+
+        assert!(error.to_string().contains("timed out after 25ms"));
+        assert_eq!(fs::read_to_string(tf_marker).into_diagnostic()?, "init\n");
         Ok(())
     }
 
@@ -991,6 +1270,7 @@ cp "$3" '{}'
             &tf_bin,
             "null",
             &["plan".to_owned()],
+            None,
         )?;
 
         assert!(status.success());
@@ -1026,6 +1306,7 @@ cp "$3" '{}'
             &tf_bin,
             "null",
             &["plan".to_owned()],
+            None,
         )?;
 
         assert_eq!(status.code(), Some(17));
@@ -1062,6 +1343,7 @@ cp "$3" '{}'
                 "init".to_owned(),
                 "-upgrade".to_owned(),
             ],
+            None,
         )?;
 
         assert!(status.success());
@@ -1102,6 +1384,7 @@ cp "$3" '{}'
             &tf_bin,
             "null",
             &["-chdir=other".to_owned(), "plan".to_owned()],
+            None,
         )?;
 
         assert!(status.success());

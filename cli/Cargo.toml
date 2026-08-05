@@ -23,6 +23,7 @@ clap = { version = "4.5.53", features = [
 ] }
 # 4.6.7's dynamic feature depends on an unavailable shlex 2.x release.
 clap_complete = { version = "=4.6.6", features = ["unstable-dynamic"] }
+humantime = "2.4.0"
 inquire = "0.9.4"
 miette = { version = "7.6.0", features = ["fancy", "serde"] }
 owo-colors = "4.2.3"
@@ -30,6 +31,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 shell-words = "1.1.1"
 which = "8.0.0"
+wait-timeout = "0.2.1"
 
 [lints.clippy]
 all = "warn"

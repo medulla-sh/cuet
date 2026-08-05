@@ -1,11 +1,12 @@
 use crate::cli::{Env, parse_env};
-use crate::execution::capture_tf_in;
+use crate::execution::{capture_tf_in, terraform_read_timeout};
 use crate::logger::Logger;
 use crate::workspace::Workspace;
 use miette::{IntoDiagnostic, Result};
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::time::Duration;
 
 const TERRAFORM_INIT_STATE_FILE: &str = ".terraform/terraform.tfstate";
 
@@ -54,12 +55,19 @@ pub fn inspect(
     workspace: &Workspace,
     tf_bin: &Path,
     environment: &Env,
+    timeout: Option<Duration>,
 ) -> Result<Option<Reconciliation>> {
     let directory = workspace.target_dir().join(".cuet").join(environment);
     if !directory.join(TERRAFORM_INIT_STATE_FILE).is_file() {
         return Ok(None);
     }
-    let state = inspect_state(logger, tf_bin, &directory, environment)?;
+    let state = inspect_state(
+        logger,
+        tf_bin,
+        &directory,
+        environment,
+        Some(terraform_read_timeout(timeout)),
+    )?;
     if !state.has_state {
         return Ok(None);
     }
@@ -74,8 +82,9 @@ pub fn remove_if_empty(
     workspace: &Workspace,
     tf_bin: &Path,
     environment: &Env,
+    timeout: Option<Duration>,
 ) -> Result<()> {
-    if inspect(logger, workspace, tf_bin, environment)?.is_some() {
+    if inspect(logger, workspace, tf_bin, environment, timeout)?.is_some() {
         return Ok(());
     }
     remove_local(workspace, environment)
@@ -106,8 +115,9 @@ fn inspect_state(
     tf_bin: &Path,
     directory: &Path,
     environment: &Env,
+    timeout: Option<Duration>,
 ) -> Result<EnvironmentState> {
-    let resources = capture_tf_in(logger, tf_bin, directory, &["state", "list"])?;
+    let resources = capture_tf_in(logger, tf_bin, directory, &["state", "list"], timeout)?;
     if !resources.status.success() {
         let stderr = String::from_utf8_lossy(&resources.stderr);
         if state_missing(&stderr) {
@@ -142,7 +152,7 @@ fn inspect_state(
         });
     }
 
-    let outputs = capture_tf_in(logger, tf_bin, directory, &["output", "-json"])?;
+    let outputs = capture_tf_in(logger, tf_bin, directory, &["output", "-json"], timeout)?;
     if !outputs.status.success() {
         let stderr = String::from_utf8_lossy(&outputs.stderr);
         if state_missing(&stderr) {
@@ -349,6 +359,7 @@ fi
             &workspace,
             &tf_bin,
             &"legacy".to_owned(),
+            None,
         )?
         .expect("legacy should have state");
         let output_reconciliation = inspect(
@@ -356,6 +367,7 @@ fi
             &workspace,
             &tf_bin,
             &"outputs".to_owned(),
+            None,
         )?
         .expect("outputs should count as state");
         let empty = inspect(
@@ -363,6 +375,7 @@ fi
             &workspace,
             &tf_bin,
             &"empty".to_owned(),
+            None,
         )?;
 
         assert_eq!(reconciliation.environment, "legacy");
@@ -372,7 +385,13 @@ fi
         assert!(workspace.target_dir().join(".cuet/empty").is_dir());
 
         fs::write(workspace.target_dir().join(".cuet/live/removed"), "").into_diagnostic()?;
-        remove_if_empty(&Logger::new(false), &workspace, &tf_bin, &"live".to_owned())?;
+        remove_if_empty(
+            &Logger::new(false),
+            &workspace,
+            &tf_bin,
+            &"live".to_owned(),
+            None,
+        )?;
 
         assert!(!workspace.target_dir().join(".cuet/live").exists());
         Ok(())

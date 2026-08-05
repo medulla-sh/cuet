@@ -118,6 +118,15 @@ does not contain OpenTofu backend metadata. Explicit `cuet tf init` commands
 run only the requested initialization, so backend migration and reconfiguration
 options remain under your control.
 
+Remote-state reads time out after 30 seconds by default. Override the timeout
+for any OpenTofu command with `--timeout`:
+
+```bash
+cuet --timeout 2m -t infra/neon:dev tf output -json
+```
+
+Other commands retain OpenTofu's defaults. CUE evaluation is not timed.
+
 To bootstrap a backend for a new environment, use local state first:
 
 ```bash
