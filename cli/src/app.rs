@@ -1,13 +1,16 @@
-use crate::cli::{Cli, Commands, Env, MigrationCommand, ModuleTarget, ModulesCommand, parse_env};
+use crate::cli::{
+    Cli, Commands, Env, MigrationCommand, ModuleTarget, ModulesCommand, Target, parse_env,
+};
 use crate::completions;
 use crate::environment;
 use crate::execution::{
-    capture_tf_in, check_cue_export, export_historical_backend, export_terraform,
-    export_terraform_to, export_terraform_with_backend_to, output_tf_in, read_backend_config,
-    read_migration_metadata, read_terraform_config, replace_root_backend, resolve_tool, run_cue,
-    run_tf, run_tf_in, run_tfmigrate,
+    TerraformMetadata, capture_tf_in, check_cue_export, export_historical_backend,
+    export_terraform, export_terraform_to, export_terraform_with_backend_to, output_tf_in,
+    read_backend_config, read_migration_metadata, read_terraform_config, replace_root_backend,
+    resolve_tool, run_cue, run_tf_in, run_tf_with_metadata, run_tfmigrate,
 };
 use crate::logger::Logger;
+use crate::reconciliation;
 use crate::workspace::{Workspace, discover_modules, resolve_root};
 use clap::CommandFactory;
 use miette::{IntoDiagnostic, Result};
@@ -99,10 +102,12 @@ fn run_target_command(
     invocation: TargetInvocation,
     current_dir: &std::path::Path,
 ) -> Result<Option<ExitStatus>> {
-    let target = invocation.target.unwrap_or_default();
+    let default_target = Target::default();
+    let target = invocation.target.as_ref().unwrap_or(&default_target);
     let cue_bin = resolve_tool(
         &invocation
             .cue_path
+            .clone()
             .unwrap_or_else(|| PathBuf::from(DEFAULT_CUE_BIN)),
     )?;
     let workspace = Workspace::resolve(
@@ -116,43 +121,41 @@ fn run_target_command(
         Cow::Borrowed("null")
     };
     let logger = Logger::new(invocation.verbose);
-    let env = target.environment.map_or_else(
-        || {
-            debug!(logger, "Discovering populated environments");
-            environment::discover(&cue_bin, &workspace, &backend_override_value)
-        },
-        Ok,
-    )?;
 
-    log_target_configuration(&logger, &workspace, &env, &cue_bin, &invocation.command);
+    if matches!(&invocation.command, Commands::Tf { .. }) {
+        return run_terraform_target(
+            &invocation,
+            target,
+            &cue_bin,
+            &workspace,
+            &backend_override_value,
+            &logger,
+        );
+    }
+
+    let discovered_env;
+    let env = if let Some(env) = target.environment.as_ref() {
+        env
+    } else {
+        debug!(logger, "Discovering populated environments");
+        discovered_env = environment::discover(&cue_bin, &workspace, &backend_override_value)?;
+        &discovered_env
+    };
+
+    log_target_configuration(&logger, &workspace, env, &cue_bin, &invocation.command);
 
     match invocation.command {
         Commands::Cue { command } => run_cue(
             &logger,
             &workspace,
-            &env,
+            env,
             &cue_bin,
             &backend_override_value,
             &command,
         )
         .map(Some),
-        Commands::Tf { args } => {
-            let tf_bin = resolve_tool(
-                &invocation
-                    .tf_path
-                    .unwrap_or_else(|| PathBuf::from(DEFAULT_TF_BIN)),
-            )?;
-            debug!(logger, "Tf Bin: {:?}", tf_bin);
-            run_tf(
-                &logger,
-                &workspace,
-                &env,
-                &cue_bin,
-                &tf_bin,
-                &backend_override_value,
-                &args,
-            )
-            .map(Some)
+        Commands::Tf { .. } => {
+            unreachable!("Terraform commands return before environment selection")
         }
         Commands::Migrate { command } => {
             let tf_bin = if matches!(
@@ -170,7 +173,7 @@ fn run_target_command(
             MigrationRunner {
                 logger: &logger,
                 workspace: &workspace,
-                env: &env,
+                env,
                 cue_bin: &cue_bin,
                 tf_bin: tf_bin.as_deref(),
                 tfmigrate_path: invocation.tfmigrate_path.as_deref(),
@@ -188,6 +191,59 @@ fn run_target_command(
             unreachable!("version command handled before tool resolution")
         }
     }
+}
+
+fn run_terraform_target(
+    invocation: &TargetInvocation,
+    target: &Target,
+    cue_bin: &std::path::Path,
+    workspace: &Workspace,
+    backend_override_value: &str,
+    logger: &Logger,
+) -> Result<Option<ExitStatus>> {
+    let Commands::Tf { args } = &invocation.command else {
+        unreachable!("Terraform target runner requires a Terraform command");
+    };
+    let tf_bin = resolve_tool(
+        &invocation
+            .tf_path
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_TF_BIN)),
+    )?;
+    debug!(logger, "Tf Bin: {:?}", tf_bin);
+    let desired_environments = environment::populated(cue_bin, workspace, backend_override_value)?;
+    let initialized_environments = reconciliation::environment_names(workspace)?;
+    let selected_env;
+    let env = if let Some(env) = target.environment.as_ref() {
+        env
+    } else {
+        let mut environments = desired_environments.clone();
+        environments.extend(initialized_environments);
+        selected_env = environment::select(environments)?;
+        &selected_env
+    };
+    let reconciliation = reconciliation::inspect(logger, workspace, &tf_bin, env)?;
+    if !desired_environments.contains(env) && reconciliation.is_none() {
+        reconciliation::remove_local(workspace, env)?;
+        return Err(miette::miette!(
+            "Environment '{env}' has no remaining state"
+        ));
+    }
+
+    log_target_configuration(logger, workspace, env, cue_bin, &invocation.command);
+    let metadata = TerraformMetadata {
+        backend_override_value,
+        reconciliation: reconciliation.as_ref(),
+    };
+    let status = run_tf_with_metadata(logger, workspace, env, cue_bin, &tf_bin, &metadata, args)?;
+    let command = args.iter().find(|argument| !argument.starts_with('-'));
+    if status.success()
+        && !desired_environments.contains(env)
+        && command.is_some_and(|command| matches!(command.as_str(), "apply" | "destroy"))
+    {
+        reconciliation::remove_if_empty(logger, workspace, &tf_bin, env)?;
+    }
+    Ok(Some(status))
 }
 
 fn log_target_configuration(
@@ -1348,6 +1404,157 @@ fi
             ),
         )?;
         Ok((cue_bin, cue_marker, tf_bin, tf_marker))
+    }
+
+    #[test]
+    fn test_terraform_apply_reconciles_and_removes_historical_environment() -> Result<()> {
+        let temp = TestDirectory::new()?;
+        let root = temp.path().join("workspace");
+        let module = root.join("service");
+        let environment_dir = module.join(".cuet/global");
+        let unrelated_dir = module.join(".cuet/unrelated");
+        fs::create_dir_all(environment_dir.join(".terraform")).into_diagnostic()?;
+        fs::create_dir_all(unrelated_dir.join(".terraform")).into_diagnostic()?;
+        fs::write(root.join(".cuetroot.cue"), "").into_diagnostic()?;
+        fs::write(module.join("cuet.cue"), "").into_diagnostic()?;
+        fs::write(environment_dir.join(".terraform/terraform.tfstate"), "").into_diagnostic()?;
+        fs::write(unrelated_dir.join(".terraform/terraform.tfstate"), "").into_diagnostic()?;
+
+        let cue_bin = temp.path().join("cue");
+        let cue_expression = temp.path().join("cue-expression");
+        write_executable(
+            &cue_bin,
+            &format!(
+                r#"#!/usr/bin/env bash
+set -euo pipefail
+expression=""
+output=""
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -e) expression=$2; shift 2 ;;
+        -o) output=$2; shift 2 ;;
+        *) shift ;;
+    esac
+done
+if [[ $expression == \[* ]]; then
+    printf '[]'
+elif [[ -n $output ]]; then
+    printf '%s' "$expression" > '{}'
+    printf '{{}}' > "$output"
+fi
+"#,
+                cue_expression.display()
+            ),
+        )?;
+        let tf_bin = temp.path().join("tofu");
+        let applied = temp.path().join("applied");
+        write_executable(
+            &tf_bin,
+            &format!(
+                r#"#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+    "state list")
+        if [[ $PWD == */unrelated ]]; then exit 99; fi
+        if [[ ! -f '{}' ]]; then printf '%s\n' 'neon_project.example'; fi
+        ;;
+    "output -json") printf '{{}}' ;;
+    "apply") touch '{}' ;;
+esac
+"#,
+                applied.display(),
+                applied.display()
+            ),
+        )?;
+        let cli = Cli {
+            verbose: false,
+            target: Some(Target {
+                module: ModuleTarget::WorkspaceRelative(PathBuf::from("service")),
+                environment: Some("global".to_owned()),
+            }),
+            workspace: Some(root),
+            cue_path: Some(cue_bin),
+            tf_path: Some(tf_bin),
+            tfmigrate_path: None,
+            use_local_backend: false,
+            command: Commands::Tf {
+                args: vec!["apply".to_owned()],
+            },
+        };
+
+        let status = run_from(cli, temp.path(), &mut Vec::new())?
+            .expect("Terraform command should return a status");
+
+        assert!(status.success());
+        assert!(applied.is_file());
+        assert!(!environment_dir.exists());
+        assert!(unrelated_dir.exists());
+        let expression = fs::read_to_string(cue_expression).into_diagnostic()?;
+        assert!(
+            expression.contains(
+                r#"reconciliation: {"environment":"global","requiredProviders":["neon"]}"#
+            )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_terraform_rejects_selected_historical_environment_without_state() -> Result<()> {
+        let temp = TestDirectory::new()?;
+        let root = temp.path().join("workspace");
+        let module = root.join("service");
+        let environment_dir = module.join(".cuet/old");
+        fs::create_dir_all(environment_dir.join(".terraform")).into_diagnostic()?;
+        fs::write(root.join(".cuetroot.cue"), "").into_diagnostic()?;
+        fs::write(module.join("cuet.cue"), "").into_diagnostic()?;
+        fs::write(environment_dir.join(".terraform/terraform.tfstate"), "").into_diagnostic()?;
+        let cue_bin = temp.path().join("cue");
+        write_executable(
+            &cue_bin,
+            r"#!/usr/bin/env bash
+set -euo pipefail
+printf '[]'
+",
+        )?;
+        let tf_bin = temp.path().join("tofu");
+        let invocations = temp.path().join("tofu-invocations");
+        write_executable(
+            &tf_bin,
+            &format!(
+                r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> '{}'
+if [[ $* == 'output -json' ]]; then printf '{{}}'; fi
+"#,
+                invocations.display()
+            ),
+        )?;
+        let cli = Cli {
+            verbose: false,
+            target: Some(Target {
+                module: ModuleTarget::WorkspaceRelative(PathBuf::from("service")),
+                environment: Some("old".to_owned()),
+            }),
+            workspace: Some(root),
+            cue_path: Some(cue_bin),
+            tf_path: Some(tf_bin),
+            tfmigrate_path: None,
+            use_local_backend: false,
+            command: Commands::Tf {
+                args: vec!["plan".to_owned()],
+            },
+        };
+
+        let error = run_from(cli, temp.path(), &mut Vec::new())
+            .expect_err("empty historical environment should be rejected");
+
+        assert!(error.to_string().contains("has no remaining state"));
+        assert!(!environment_dir.exists());
+        assert_eq!(
+            fs::read_to_string(invocations).into_diagnostic()?,
+            "state list\noutput -json\n"
+        );
+        Ok(())
     }
 
     fn write_executable(path: &Path, body: &str) -> Result<()> {

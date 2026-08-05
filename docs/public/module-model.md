@@ -33,6 +33,28 @@ At a high level:
    `infra.out[env].terraform`.
 1. CLI exports that output to `.cuet/<env>/main.tf.json`.
 
+## Removing environments
+
+Generated `.cuet/<env>` directories also identify environments that may retain
+managed objects after their input is removed from `infra.in`. The CLI includes
+initialized directory names in environment selection, then inspects only the
+selected environment with `tofu state list`. A selected environment with state
+is injected into the framework so an empty desired configuration can destroy
+its remaining objects.
+
+Provider names are inferred from state resource types. The framework emits the
+current default configuration and every configured alias for those providers.
+Provider registrations and aliases must therefore remain configured until all
+resources using them have been destroyed.
+
+After a historical environment has no resources, data sources, or outputs, the
+CLI removes its local `.cuet/<env>` directory. It does not delete the empty
+state snapshot from a remote backend; backend-specific cleanup belongs outside
+Cuet.
+
+Selecting a historical environment whose state is already empty removes its
+stale local directory and exits without running the requested Terraform command.
+
 ## Shape of a module
 
 ```cue

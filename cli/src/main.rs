@@ -8,6 +8,7 @@ mod cli;
 mod completions;
 mod environment;
 mod execution;
+mod reconciliation;
 #[cfg(test)]
 mod test_support;
 mod workspace;

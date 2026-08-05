@@ -16,8 +16,10 @@ package cuet
 	#module: string
 	#backendConfigs: [string]: [string]: {...}
 	#backendConfigs: _ | *{}
-	#envName:        string
-	#env:            _
+	#envName: string
+	#env:     _
+	#historicalProviders: [...string]
+	#historicalProviders: _ | *[]
 	#provider?:      string
 	#providerAlias?: string
 	#import?:        string

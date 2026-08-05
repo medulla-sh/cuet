@@ -42,6 +42,11 @@ _#DefaultProviderAlias: ""
 	// useful when setting up a new backend
 	localBackendOverride: string | null
 	localBackendOverride: _ | *null
+	reconciliation: null | {
+		environment: string
+		requiredProviders: [...string]
+	}
+	reconciliation: _ | *null
 }
 
 #TerraformConfig: {
@@ -155,9 +160,9 @@ _#DefaultProviderAlias: ""
 
 		// The actual infrastructure configuration. This is where you place all
 		// your configurations.
-		in: close({
+		let environmentInputs = {
 			for e, _ in #Environments {
-				(e)?: #TerraformInput & {
+				(e): #TerraformInput & {
 					#module:         infraThis.#metadata.module
 					#backendConfigs: backendConfigs
 					#envName:        e
@@ -172,6 +177,15 @@ _#DefaultProviderAlias: ""
 						})]
 					}
 				}
+			}
+		}
+
+		in: close({
+			for e, _ in #Environments {
+				(e)?: environmentInputs[e]
+			}
+			if infraThis.#metadata.reconciliation != null {
+				(infraThis.#metadata.reconciliation.environment): environmentInputs[infraThis.#metadata.reconciliation.environment]
 			}
 		})
 
@@ -193,6 +207,11 @@ _#DefaultProviderAlias: ""
 			let metadata = infraThis.#metadata
 
 			for e, _ in infraThis["in"] {
+				let historicalProviders = [
+					if metadata.reconciliation != null
+					if metadata.reconciliation.environment == e {metadata.reconciliation.requiredProviders},
+					[],
+				][0]
 				(e): (_#GenerateTf & {
 					tfConfig: #Terraform & {
 						#metadata: metadata
@@ -200,8 +219,9 @@ _#DefaultProviderAlias: ""
 						#env:      #Environments[e]
 					}
 					tf: infraThis["in"][e] & {
-						#module:         metadata.module
-						#backendConfigs: backendConfigs
+						#module:              metadata.module
+						#backendConfigs:      backendConfigs
+						#historicalProviders: historicalProviders
 					}
 				}).out
 			}
@@ -433,8 +453,21 @@ _#GenerateProviders: {
 				(name): (alias): true
 			}
 		}
+		let historicalProviders = {
+			for providerName in in.#historicalProviders {
+				(providerName): {
+					(_#DefaultProviderAlias): true
+					if #BuiltinProviders[providerName] == _|_ {
+						for alias, _ in providerRegistry[providerName].aliases {
+							(alias): true
+						}
+					}
+				}
+			}
+		}
+		let requestedProviders = directProviders & historicalProviders
 		let bootstrapProviders = {
-			for providerName, aliases in directProviders if #BuiltinProviders[providerName] == _|_ {
+			for providerName, aliases in requestedProviders if #BuiltinProviders[providerName] == _|_ {
 				let registration = providerRegistry[providerName]
 				let providerBlocks = [
 					for alias, _ in aliases {[
@@ -463,8 +496,8 @@ _#GenerateProviders: {
 				}
 			}
 		}
-		let directProviderInstances = [
-			for name, aliases in directProviders
+		let requestedProviderInstances = [
+			for name, aliases in requestedProviders
 			for alias, _ in aliases {
 				"name":  name
 				"alias": alias
@@ -477,7 +510,7 @@ _#GenerateProviders: {
 				"alias": alias
 			},
 		]
-		let providerInstances = list.Concat([directProviderInstances, bootstrapProviderInstances])
+		let providerInstances = list.Concat([requestedProviderInstances, bootstrapProviderInstances])
 		let selectedProviders = {
 			for instance in providerInstances {
 				(instance.name): (instance.alias): true

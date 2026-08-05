@@ -25,6 +25,18 @@ pub fn discover(
     )
 }
 
+pub fn select(environments: impl IntoIterator<Item = Env>) -> Result<Env> {
+    select_with(
+        environments,
+        stdin().is_terminal() && stderr().is_terminal(),
+        |items| {
+            Select::new("Select an environment", items)
+                .prompt_skippable()
+                .into_diagnostic()
+        },
+    )
+}
+
 /// Returns every populated environment in a module.
 pub fn populated(
     cue_bin: &Path,

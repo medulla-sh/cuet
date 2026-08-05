@@ -10,6 +10,7 @@ cuet.#InfraModule
 
 #Environments: {
 	dev: {}
+	old: {}
 	prod: {}
 }
 
@@ -38,6 +39,7 @@ cuet.#InfraModule
 				bootstrap: secret.out
 				provider: api_key: "${data.google_secret_manager_secret_version.neon.secret_data}"
 			}
+			aliases: readonly: provider: api_key: "readonly"
 		}
 	}
 }
@@ -46,6 +48,10 @@ infra: {
 	#metadata: {
 		module:               "test/module"
 		localBackendOverride: null
+		reconciliation: {
+			environment: "old"
+			requiredProviders: ["neon", "neon"]
+		}
 	}
 	in: dev: {
 		let project = neon.#Project & {"in": {
@@ -98,6 +104,7 @@ infra: {
 			}]
 			...
 		}
+		old:  _
 		prod: _
 	})
 	out: close({
@@ -121,6 +128,30 @@ infra: {
 				...
 			}
 			kubernetes: enabled: true
+		}
+		old: terraform: {
+			terraform: required_providers: {
+				google: {
+					source:  "hashicorp/google"
+					version: ">=6"
+				}
+				neon: {
+					source:  "kislerdm/neon"
+					version: "~>0.13"
+				}
+			}
+			provider: {
+				google: [{project: "example"}]
+				neon: [{api_key: "${data.google_secret_manager_secret_version.neon.secret_data}"}, {
+					alias:   "readonly"
+					api_key: "readonly"
+				}]
+			}
+			data: google_secret_manager_secret_version: neon: {
+				project: "example"
+				secret:  "neon"
+			}
+			...
 		}
 		prod: terraform: _
 	})

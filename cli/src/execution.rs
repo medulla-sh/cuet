@@ -1,5 +1,6 @@
 use crate::cli::{CueCommand, Env};
 use crate::logger::Logger;
+use crate::reconciliation::Reconciliation;
 use crate::workspace::Workspace;
 use miette::{IntoDiagnostic, Result};
 use std::borrow::Cow;
@@ -14,6 +15,11 @@ const TFMIGRATE_FILE_NAME: &str = "tfmigrate.json";
 const TERRAFORM_INIT_STATE_FILE: &str = ".terraform/terraform.tfstate";
 const TFMIGRATE_OVERRIDE_FILE: &str = "_tfmigrate_override.tf";
 
+pub struct TerraformMetadata<'a> {
+    pub backend_override_value: &'a str,
+    pub reconciliation: Option<&'a Reconciliation>,
+}
+
 fn metadata_expression(workspace: &Workspace, backend_override_value: &str) -> String {
     metadata_expression_for_module(workspace.module_name(), backend_override_value)
 }
@@ -22,6 +28,22 @@ fn metadata_expression_for_module(module: &str, backend_override_value: &str) ->
     let module = serde_json::Value::String(module.to_owned());
     format!(
         "{{ #metadata: {{ module: {module}, localBackendOverride: {backend_override_value} }} }}"
+    )
+}
+
+fn reconciled_metadata_expression(
+    workspace: &Workspace,
+    backend_override_value: &str,
+    reconciliation: Option<&Reconciliation>,
+) -> String {
+    let Some(reconciliation) = reconciliation else {
+        return metadata_expression(workspace, backend_override_value);
+    };
+    let module = serde_json::Value::String(workspace.module_name().to_owned());
+    let reconciliation = serde_json::to_string(reconciliation)
+        .expect("reconciliation metadata should always serialize");
+    format!(
+        "{{ #metadata: {{ module: {module}, localBackendOverride: {backend_override_value}, reconciliation: {reconciliation} }} }}"
     )
 }
 
@@ -46,6 +68,19 @@ fn export_expression(workspace: &Workspace, env: &Env, backend_override_value: &
     format!(
         "((infra & {}).out)[{environment}].terraform",
         metadata_expression(workspace, backend_override_value)
+    )
+}
+
+fn reconciled_export_expression(
+    workspace: &Workspace,
+    env: &Env,
+    backend_override_value: &str,
+    reconciliation: Option<&Reconciliation>,
+) -> String {
+    let environment = serde_json::Value::String(env.clone());
+    format!(
+        "((infra & {}).out)[{environment}].terraform",
+        reconciled_metadata_expression(workspace, backend_override_value, reconciliation)
     )
 }
 
@@ -185,6 +220,7 @@ pub fn check_cue_export(
     process.output().into_diagnostic()
 }
 
+#[cfg(test)]
 pub fn run_tf(
     logger: &Logger,
     workspace: &Workspace,
@@ -194,8 +230,37 @@ pub fn run_tf(
     backend_override_value: &str,
     args: &[String],
 ) -> Result<ExitStatus> {
-    let (export_status, output_dir) =
-        export_terraform(logger, workspace, env, cue_bin, backend_override_value)?;
+    run_tf_with_metadata(
+        logger,
+        workspace,
+        env,
+        cue_bin,
+        tf_bin,
+        &TerraformMetadata {
+            backend_override_value,
+            reconciliation: None,
+        },
+        args,
+    )
+}
+
+pub fn run_tf_with_metadata(
+    logger: &Logger,
+    workspace: &Workspace,
+    env: &Env,
+    cue_bin: &Path,
+    tf_bin: &Path,
+    metadata: &TerraformMetadata<'_>,
+    args: &[String],
+) -> Result<ExitStatus> {
+    let (export_status, output_dir) = export_reconciled_terraform(
+        logger,
+        workspace,
+        env,
+        cue_bin,
+        metadata.backend_override_value,
+        metadata.reconciliation,
+    )?;
     if !export_status.success() {
         return Ok(export_status);
     }
@@ -214,6 +279,25 @@ pub fn run_tf(
     }
 
     run_command(logger, &mut terraform_command(tf_bin, &output_dir, args))
+}
+
+fn export_reconciled_terraform(
+    logger: &Logger,
+    workspace: &Workspace,
+    env: &Env,
+    cue_bin: &Path,
+    backend_override_value: &str,
+    reconciliation: Option<&Reconciliation>,
+) -> Result<(ExitStatus, PathBuf)> {
+    let output_dir = workspace.target_dir().join(OUTPUT_FOLDER_NAME).join(env);
+    let status = export_terraform_expression_to(
+        logger,
+        workspace,
+        cue_bin,
+        &reconciled_export_expression(workspace, env, backend_override_value, reconciliation),
+        &output_dir,
+    )?;
+    Ok((status, output_dir))
 }
 
 pub fn export_terraform(
@@ -555,11 +639,12 @@ pub fn resolve_tool(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        OUTPUT_FOLDER_NAME, TERRAFORM_INIT_STATE_FILE, cue_command, replace_root_backend, run_tf,
-        run_tfmigrate,
+        OUTPUT_FOLDER_NAME, TERRAFORM_INIT_STATE_FILE, cue_command, reconciled_export_expression,
+        replace_root_backend, run_tf, run_tfmigrate,
     };
     use crate::cli::{CueCommand, ModuleTarget};
     use crate::logger::Logger;
+    use crate::reconciliation::Reconciliation;
     use crate::test_support::TestDirectory;
     use crate::workspace::Workspace;
     use miette::{IntoDiagnostic, Result};
@@ -616,6 +701,29 @@ mod tests {
                 "yaml",
             ]
             .map(OsStr::new)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_reconciled_export_expression_injects_historical_providers() -> Result<()> {
+        let temp = TestDirectory::new()?;
+        let workspace = test_workspace(&temp)?;
+        let reconciliation = Reconciliation {
+            environment: "global".to_owned(),
+            required_providers: vec!["google".to_owned(), "neon".to_owned()],
+        };
+
+        let expression = reconciled_export_expression(
+            &workspace,
+            &"global".to_owned(),
+            "null",
+            Some(&reconciliation),
+        );
+
+        assert_eq!(
+            expression,
+            r#"((infra & { #metadata: { module: "infra/neon", localBackendOverride: null, reconciliation: {"environment":"global","requiredProviders":["google","neon"]} } }).out)["global"].terraform"#
         );
         Ok(())
     }
