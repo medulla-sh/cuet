@@ -208,6 +208,7 @@ dependencies = [
  "clap_complete",
  "humantime",
  "inquire",
+ "libc",
  "miette",
  "owo-colors",
  "serde",

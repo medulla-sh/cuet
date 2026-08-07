@@ -4,8 +4,9 @@ use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::io::{self, Read};
 use std::os::fd::AsFd;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Command, ExitStatus, Output, Stdio};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 use wait_timeout::ChildExt;
@@ -157,9 +158,10 @@ pub fn run_with_timeout(
         return run(logger, command);
     };
     let command_string = log_command(logger, command);
+    command.process_group(0);
     let mut child = command.spawn().into_diagnostic()?;
     let Some(status) = child.wait_timeout(timeout.remaining()).into_diagnostic()? else {
-        child.kill().into_diagnostic()?;
+        kill_process_group(&mut child)?;
         child.wait().into_diagnostic()?;
         return Err(miette::miette!(
             "Command timed out after {}: {command_string}",
@@ -179,6 +181,7 @@ pub fn output(
         return command.output().into_diagnostic();
     };
     let command_string = log_command(logger, command);
+    command.process_group(0);
     let mut child = command.spawn().into_diagnostic()?;
     let stdout = child.stdout.take().map(|mut stdout| {
         thread::spawn(move || {
@@ -196,7 +199,7 @@ pub fn output(
         if let Some(status) = child.wait_timeout(timeout.remaining()).into_diagnostic()? {
             (status, false)
         } else {
-            child.kill().into_diagnostic()?;
+            kill_process_group(&mut child)?;
             (child.wait().into_diagnostic()?, true)
         };
     let stdout = join_output(stdout)?;
@@ -212,6 +215,19 @@ pub fn output(
         stdout,
         stderr,
     })
+}
+
+fn kill_process_group(child: &mut Child) -> Result<()> {
+    let process_group = i32::try_from(child.id())
+        .map_err(|_| miette::miette!("Child process ID does not fit in a Unix process ID"))?;
+    // Negative PIDs address process groups. The child becomes its own group leader before spawn.
+    if unsafe { libc::kill(-process_group, libc::SIGKILL) } == -1 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(error).into_diagnostic();
+        }
+    }
+    Ok(())
 }
 
 fn join_output(handle: Option<thread::JoinHandle<io::Result<Vec<u8>>>>) -> Result<Vec<u8>> {
@@ -247,8 +263,10 @@ fn log_command(logger: &Logger, command: &Command) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::timeout;
-    use std::time::Duration;
+    use super::{CommandTimeout, output, run_with_timeout, timeout};
+    use crate::logger::Logger;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
 
     #[test]
     fn test_terraform_timeout_defaults_remote_reads() {
@@ -260,5 +278,42 @@ mod tests {
             timeout(&["apply".to_owned()], Some(expected)),
             Some(expected)
         );
+    }
+
+    #[test]
+    fn test_run_with_timeout_kills_process_group() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30 & wait"]);
+        let started = Instant::now();
+
+        let error = run_with_timeout(
+            &Logger::new(false),
+            &mut command,
+            Some(CommandTimeout::new(Duration::from_millis(50))),
+        )
+        .expect_err("command should time out");
+
+        assert!(error.to_string().contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn test_output_timeout_kills_descendant_holding_pipe() {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "sleep 30 & wait"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let started = Instant::now();
+
+        let error = output(
+            &Logger::new(false),
+            &mut command,
+            Some(CommandTimeout::new(Duration::from_millis(50))),
+        )
+        .expect_err("command should time out");
+
+        assert!(error.to_string().contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 }
