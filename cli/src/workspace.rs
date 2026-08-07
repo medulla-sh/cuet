@@ -21,15 +21,40 @@ impl Workspace {
         root_override: Option<&Path>,
         module: &ModuleTarget,
     ) -> Result<Self> {
-        let current_dir = canonicalize_directory(current_dir, "Current directory")?;
-        let root = resolve_root_from(&current_dir, root_override)?;
-        let target = match module {
+        match module {
             ModuleTarget::Relative(path) => {
-                canonicalize_directory(&current_dir.join(path), "Target module")?
+                Self::resolve_path(current_dir, root_override, path, false)
             }
             ModuleTarget::WorkspaceRelative(path) => {
-                canonicalize_directory(&root.join(path), "Target module")?
+                Self::resolve_path(current_dir, root_override, path, true)
             }
+        }
+    }
+
+    pub fn resolve_current(current_dir: &Path, root_override: Option<&Path>) -> Result<Self> {
+        Self::resolve_path(current_dir, root_override, Path::new("."), false)
+    }
+
+    pub fn resolve_workspace_relative(
+        current_dir: &Path,
+        root_override: Option<&Path>,
+        module: &Path,
+    ) -> Result<Self> {
+        Self::resolve_path(current_dir, root_override, module, true)
+    }
+
+    fn resolve_path(
+        current_dir: &Path,
+        root_override: Option<&Path>,
+        module: &Path,
+        workspace_relative: bool,
+    ) -> Result<Self> {
+        let current_dir = canonicalize_directory(current_dir, "Current directory")?;
+        let root = resolve_root_from(&current_dir, root_override)?;
+        let target = if workspace_relative {
+            canonicalize_directory(&root.join(module), "Target module")?
+        } else {
+            canonicalize_directory(&current_dir.join(module), "Target module")?
         };
         let module_path = target.strip_prefix(&root).map_err(|_| {
             miette::miette!(
@@ -145,12 +170,11 @@ fn canonicalize_directory(path: &Path, label: &str) -> Result<PathBuf> {
 }
 
 fn resolve_explicit_root(current_dir: &Path, path: &Path) -> Result<PathBuf> {
-    let path = if path.is_absolute() {
-        path.to_owned()
+    let root = if path.is_absolute() {
+        canonicalize_directory(path, "Workspace root")?
     } else {
-        current_dir.join(path)
+        canonicalize_directory(&current_dir.join(path), "Workspace root")?
     };
-    let root = canonicalize_directory(&path, "Workspace root")?;
     if !root.join(WORKSPACE_MARKER).is_file() {
         return Err(miette::miette!(
             "Workspace root '{}' does not contain {WORKSPACE_MARKER}",
