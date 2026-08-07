@@ -1,8 +1,8 @@
-use crate::cli::{Env, parse_env};
+use crate::cli::{Env, validate_env};
 use crate::workspace::Workspace;
 use inquire::Select;
 use miette::{IntoDiagnostic, Result};
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::io::{IsTerminal, stderr, stdin};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -25,7 +25,11 @@ pub fn discover(
     )
 }
 
-pub fn select(environments: impl IntoIterator<Item = Env>) -> Result<Env> {
+pub fn select<I, T>(environments: I) -> Result<T>
+where
+    I: IntoIterator<Item = T>,
+    T: Ord + std::fmt::Display,
+{
     select_with(
         environments,
         stdin().is_terminal() && stderr().is_terminal(),
@@ -42,7 +46,7 @@ pub fn populated(
     cue_bin: &Path,
     workspace: &Workspace,
     backend_override_value: &str,
-) -> Result<HashSet<Env>> {
+) -> Result<BTreeSet<Env>> {
     let output = command(cue_bin, workspace, backend_override_value)
         .output()
         .into_diagnostic()?;
@@ -61,15 +65,17 @@ pub fn populated(
     environments
         .into_iter()
         .map(|environment| {
-            parse_env(&environment).map_err(|error| {
+            validate_env(&environment).map_err(|error| {
                 miette::miette!("CUE returned invalid environment '{environment}': {error}")
-            })
+            })?;
+            Ok(environment)
         })
         .collect()
 }
 
 fn command(cue_bin: &Path, workspace: &Workspace, backend_override_value: &str) -> Command {
-    let module = serde_json::Value::String(workspace.module_name().to_owned());
+    let module = serde_json::to_string(workspace.module_name())
+        .expect("module name should always serialize");
     let expression = format!(
         "[for env, _ in (infra & {{ #metadata: {{ module: {module}, localBackendOverride: {backend_override_value} }} }})[\"in\"] {{env}}]"
     );
@@ -88,30 +94,34 @@ fn command(cue_bin: &Path, workspace: &Workspace, backend_override_value: &str) 
     process
 }
 
-fn select_with<F, I, S>(environments: I, interactive: bool, prompt: F) -> Result<Env>
+fn select_with<F, I, T>(environments: I, interactive: bool, prompt: F) -> Result<T>
 where
-    F: FnOnce(Vec<Env>) -> Result<Option<Env>>,
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
+    F: FnOnce(Vec<T>) -> Result<Option<T>>,
+    I: IntoIterator<Item = T>,
+    T: Ord + std::fmt::Display,
 {
-    let mut environments: Vec<Env> = environments
-        .into_iter()
-        .map(|environment| environment.as_ref().to_owned())
-        .collect();
+    let mut environments: Vec<T> = environments.into_iter().collect();
     environments.sort();
-    match environments.as_slice() {
-        [] => Err(miette::miette!(
+    if environments.is_empty() {
+        return Err(miette::miette!(
             "No populated environments exist in this module"
-        )),
-        [environment] => Ok(environment.clone()),
-        environments if !interactive => Err(miette::miette!(
-            "Multiple populated environments exist ({}); select one explicitly with '-t :ENV'",
-            environments.join(", ")
-        )),
-        _ => {
-            prompt(environments)?.ok_or_else(|| miette::miette!("Environment selection cancelled"))
-        }
+        ));
     }
+    if environments.len() == 1 {
+        return Ok(environments.pop().expect("one environment should exist"));
+    }
+    if !interactive {
+        let environments = environments
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(miette::miette!(
+            "Multiple populated environments exist ({}); select one explicitly with '-t :ENV'",
+            environments
+        ));
+    }
+    prompt(environments)?.ok_or_else(|| miette::miette!("Environment selection cancelled"))
 }
 
 #[cfg(test)]
@@ -204,6 +214,24 @@ mod tests {
     }
 
     #[test]
+    fn test_populated_rejects_invalid_environment_name() -> Result<()> {
+        let temp = TestDirectory::new()?;
+        let cue_bin = temp.path().join("cue");
+        write_executable(
+            &cue_bin,
+            "#!/usr/bin/env bash\nset -euo pipefail\nprintf '[\"invalid/name\"]'\n",
+        )?;
+        let workspace = test_workspace(&temp)?;
+
+        let error = populated(&cue_bin, &workspace, "null")
+            .expect_err("invalid environment should be rejected");
+
+        assert!(error.to_string().contains("invalid/name"));
+        assert!(error.to_string().contains("[A-Za-z0-9_-]+"));
+        Ok(())
+    }
+
+    #[test]
     fn test_select_environment_rejects_empty_list() {
         let error = select_with::<_, _, &str>([], false, |_| unreachable!())
             .expect_err("empty environment list should fail");
@@ -232,7 +260,7 @@ mod tests {
     fn test_select_environment_prompts_for_multiple() -> Result<()> {
         let environment = select_with(["prod", "dev"], true, |options| {
             assert_eq!(options, ["dev", "prod"]);
-            Ok(Some(options[1].clone()))
+            Ok(Some(options[1]))
         })?;
 
         assert_eq!(environment, "prod");

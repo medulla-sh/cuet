@@ -82,13 +82,7 @@ impl FromStr for Target {
             None => (value, None),
         };
 
-        let module = if module.is_empty() {
-            ModuleTarget::Relative(PathBuf::from("."))
-        } else if let Some(path) = module.strip_prefix('/') {
-            ModuleTarget::WorkspaceRelative(PathBuf::from(path))
-        } else {
-            ModuleTarget::Relative(PathBuf::from(module))
-        };
+        let module = ModuleTarget::from_cli_component(module);
 
         Ok(Self {
             module,
@@ -103,7 +97,25 @@ pub enum ModuleTarget {
     WorkspaceRelative(PathBuf),
 }
 
-pub fn parse_env(value: &str) -> Result<Env, String> {
+impl ModuleTarget {
+    pub fn from_cli_component(module: &str) -> Self {
+        if module.is_empty() {
+            Self::Relative(PathBuf::from("."))
+        } else if let Some(path) = module.strip_prefix('/') {
+            Self::WorkspaceRelative(PathBuf::from(path))
+        } else {
+            Self::Relative(PathBuf::from(module))
+        }
+    }
+}
+
+pub fn parse_env(value: impl Into<String>) -> Result<Env, String> {
+    let value = value.into();
+    validate_env(&value)?;
+    Ok(value)
+}
+
+pub fn validate_env(value: &str) -> Result<(), String> {
     if value.is_empty()
         || !value
             .chars()
@@ -111,7 +123,7 @@ pub fn parse_env(value: &str) -> Result<Env, String> {
     {
         return Err("environment must match [A-Za-z0-9_-]+".to_owned());
     }
-    Ok(value.to_owned())
+    Ok(())
 }
 
 #[derive(Subcommand, Debug)]

@@ -9,7 +9,7 @@ use clap_complete::env::{Bash, Elvish, EnvCompleter, Fish, Powershell, Shells};
 use miette::{IntoDiagnostic, Result};
 use std::ffi::{OsStr, OsString};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 const MODULE_TAG: &str = "cuet-target-module";
@@ -69,7 +69,7 @@ fn target_values(current: &str, current_dir: &Path, cue_bin: &Path) -> Result<Ve
             .into_iter()
             .map(|module| {
                 if module == "." {
-                    ".".to_owned()
+                    module
                 } else {
                     format!("/{module}")
                 }
@@ -78,13 +78,7 @@ fn target_values(current: &str, current_dir: &Path, cue_bin: &Path) -> Result<Ve
             .collect());
     };
 
-    let module_target = if module.is_empty() {
-        ModuleTarget::Relative(PathBuf::from("."))
-    } else if let Some(module) = module.strip_prefix('/') {
-        ModuleTarget::WorkspaceRelative(PathBuf::from(module))
-    } else {
-        ModuleTarget::Relative(PathBuf::from(module))
-    };
+    let module_target = ModuleTarget::from_cli_component(module);
     let workspace = Workspace::resolve(current_dir, None, &module_target)?;
     let mut environments: Vec<_> = environment::populated(cue_bin, &workspace, "null")?
         .into_iter()
@@ -119,16 +113,16 @@ impl EnvCompleter for CuetZsh {
         let name = name.replace('-', "_");
         let bin = shell_quote(bin);
         let completer = shell_quote(completer);
-        let script = r#"#compdef BIN
-function _clap_dynamic_completer_NAME() {
+        let script = r#"#compdef @@BIN@@
+function _clap_dynamic_completer_@@NAME@@() {
     local _CLAP_COMPLETE_INDEX=$(expr $CURRENT - 1)
     local _CLAP_IFS=$'\n'
 
     local completions=("${(@f)$( \
         _CLAP_IFS="$_CLAP_IFS" \
         _CLAP_COMPLETE_INDEX="$_CLAP_COMPLETE_INDEX" \
-        VAR="zsh" \
-        COMPLETER -- "${words[@]}" 2>/dev/null \
+        @@VAR@@="zsh" \
+        @@COMPLETER@@ -- "${words[@]}" 2>/dev/null \
     )}")
 
     if [[ -n $completions ]]; then
@@ -137,7 +131,7 @@ function _clap_dynamic_completer_NAME() {
         local -a other=()
         local completion
         for completion in $completions; do
-            if [[ "$completion" == MODULE_MARKER$'\t'* ]]; then
+            if [[ "$completion" == @@MODULE_MARKER@@$'\t'* ]]; then
                 modules+=("${completion#*$'\t'}")
                 continue
             fi
@@ -161,14 +155,19 @@ function _clap_dynamic_completer_NAME() {
     fi
 }
 
-compdef _clap_dynamic_completer_NAME BIN"#
-            .replace("MODULE_MARKER", MODULE_MARKER)
-            .replace("NAME", &name)
-            .replace("COMPLETER", &completer)
-            .replace("BIN", &bin)
-            .replace("VAR", var);
-
-        writeln!(output, "{script}")
+compdef _clap_dynamic_completer_@@NAME@@ @@BIN@@"#;
+        write_template(
+            output,
+            script,
+            &[
+                ("BIN", bin.as_str()),
+                ("NAME", name.as_str()),
+                ("COMPLETER", completer.as_str()),
+                ("MODULE_MARKER", MODULE_MARKER),
+                ("VAR", var),
+            ],
+        )?;
+        writeln!(output)
     }
 
     fn write_complete(
@@ -188,14 +187,12 @@ compdef _clap_dynamic_completer_NAME BIN"#
         }
 
         let candidates = complete_args(command, args, index, current_dir)?;
+        let module_tag = MODULE_TAG.into();
         for (index, candidate) in candidates.iter().enumerate() {
             if index != 0 {
                 write!(output, "{separator}")?;
             }
-            if candidate
-                .get_tag()
-                .is_some_and(|tag| tag.to_string() == MODULE_TAG)
-            {
+            if candidate.get_tag().is_some_and(|tag| tag == &module_tag) {
                 write!(
                     output,
                     "{MODULE_MARKER}\t{}",
@@ -227,6 +224,28 @@ compdef _clap_dynamic_completer_NAME BIN"#
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn write_template(
+    output: &mut dyn Write,
+    template: &str,
+    replacements: &[(&str, &str)],
+) -> std::io::Result<()> {
+    let mut parts = template.split("@@");
+    if let Some(text) = parts.next() {
+        output.write_all(text.as_bytes())?;
+    }
+    while let Some(key) = parts.next() {
+        let value = replacements
+            .iter()
+            .find_map(|(candidate, value)| (*candidate == key).then_some(*value))
+            .ok_or_else(|| std::io::Error::other(format!("Unknown template key '{key}'")))?;
+        output.write_all(value.as_bytes())?;
+        if let Some(text) = parts.next() {
+            output.write_all(text.as_bytes())?;
+        }
+    }
+    Ok(())
 }
 
 fn escape_zsh_value(value: &str) -> String {
