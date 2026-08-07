@@ -1,4 +1,5 @@
 use owo_colors::OwoColorize;
+use std::fmt;
 use std::io::{IsTerminal, stderr};
 
 pub struct Logger {
@@ -14,11 +15,11 @@ impl Logger {
         }
     }
 
-    pub fn write(&self, msg: impl AsRef<str>) {
+    pub fn write(&self, msg: fmt::Arguments<'_>) {
         if self.is_term {
-            eprintln!(" {} {}", "•".dimmed(), msg.as_ref().dimmed());
+            eprintln!(" {} {}", "•".dimmed(), msg.dimmed());
         } else {
-            eprintln!(" • {}", msg.as_ref());
+            eprintln!(" • {msg}");
         }
     }
 }
@@ -26,13 +27,13 @@ impl Logger {
 macro_rules! debug {
     ($logger:expr, $($arg:tt)*) => {
         if $logger.verbose {
-            $logger.write(format!($($arg)*));
+            $logger.write(format_args!($($arg)*));
         }
     };
 }
 
 macro_rules! info {
     ($logger:expr, $($arg:tt)*) => {
-        $logger.write(format!($($arg)*));
+        $logger.write(format_args!($($arg)*));
     };
 }
