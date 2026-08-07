@@ -9,6 +9,7 @@ mod completions;
 mod environment;
 mod execution;
 mod reconciliation;
+mod terraform;
 #[cfg(test)]
 mod test_directory;
 mod workspace;

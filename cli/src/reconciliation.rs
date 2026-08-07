@@ -1,14 +1,12 @@
 use crate::cli::{Env, parse_env};
-use crate::execution::{capture_tf_in, terraform_read_timeout};
 use crate::logger::Logger;
+use crate::terraform::{INIT_STATE_FILE, capture_in, read_timeout};
 use crate::workspace::Workspace;
 use miette::{IntoDiagnostic, Result};
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
-
-const TERRAFORM_INIT_STATE_FILE: &str = ".terraform/terraform.tfstate";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -42,7 +40,7 @@ pub fn environment_names(workspace: &Workspace) -> Result<BTreeSet<Env>> {
         let Ok(environment) = parse_env(&name) else {
             continue;
         };
-        if !entry.path().join(TERRAFORM_INIT_STATE_FILE).is_file() {
+        if !entry.path().join(INIT_STATE_FILE).is_file() {
             continue;
         }
         environments.insert(environment);
@@ -58,7 +56,7 @@ pub fn inspect(
     timeout: Option<Duration>,
 ) -> Result<Option<Reconciliation>> {
     let directory = workspace.target_dir().join(".cuet").join(environment);
-    if !directory.join(TERRAFORM_INIT_STATE_FILE).is_file() {
+    if !directory.join(INIT_STATE_FILE).is_file() {
         return Ok(None);
     }
     let state = inspect_state(
@@ -66,7 +64,7 @@ pub fn inspect(
         tf_bin,
         &directory,
         environment,
-        Some(terraform_read_timeout(timeout)),
+        Some(read_timeout(timeout)),
     )?;
     if !state.has_state {
         return Ok(None);
@@ -117,7 +115,7 @@ fn inspect_state(
     environment: &Env,
     timeout: Option<Duration>,
 ) -> Result<EnvironmentState> {
-    let resources = capture_tf_in(logger, tf_bin, directory, &["state", "list"], timeout)?;
+    let resources = capture_in(logger, tf_bin, directory, &["state", "list"], timeout)?;
     if !resources.status.success() {
         let stderr = String::from_utf8_lossy(&resources.stderr);
         if state_missing(&stderr) {
@@ -152,7 +150,7 @@ fn inspect_state(
         });
     }
 
-    let outputs = capture_tf_in(logger, tf_bin, directory, &["output", "-json"], timeout)?;
+    let outputs = capture_in(logger, tf_bin, directory, &["output", "-json"], timeout)?;
     if !outputs.status.success() {
         let stderr = String::from_utf8_lossy(&outputs.stderr);
         if state_missing(&stderr) {

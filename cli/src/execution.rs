@@ -1,43 +1,21 @@
 use crate::cli::{CueCommand, Env};
 use crate::logger::Logger;
 use crate::reconciliation::Reconciliation;
+use crate::terraform::{self, CommandTimeout};
 use crate::workspace::Workspace;
 use miette::{IntoDiagnostic, Result};
-use std::borrow::Cow;
-use std::io;
-use std::io::Read;
-use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Output, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
-use wait_timeout::ChildExt;
+use std::time::Duration;
+
+pub use crate::terraform::{
+    capture_in as capture_tf_in, output_in as output_tf_in, run_in as run_tf_in,
+};
 
 const OUTPUT_FOLDER_NAME: &str = ".cuet";
 const OUTPUT_FILE_NAME: &str = "main.tf.json";
 const TFMIGRATE_FILE_NAME: &str = "tfmigrate.json";
-const TERRAFORM_INIT_STATE_FILE: &str = ".terraform/terraform.tfstate";
 const TFMIGRATE_OVERRIDE_FILE: &str = "_tfmigrate_override.tf";
-const DEFAULT_TERRAFORM_READ_TIMEOUT: Duration = Duration::from_secs(30);
-
-#[derive(Clone, Copy)]
-struct CommandTimeout {
-    duration: Duration,
-    started: Instant,
-}
-
-impl CommandTimeout {
-    fn new(duration: Duration) -> Self {
-        Self {
-            duration,
-            started: Instant::now(),
-        }
-    }
-
-    fn remaining(self) -> Duration {
-        self.duration.saturating_sub(self.started.elapsed())
-    }
-}
 
 pub struct TerraformMetadata<'a> {
     pub backend_override_value: &'a str,
@@ -156,80 +134,6 @@ fn cue_export_file_command(
     Ok(process)
 }
 
-fn terraform_command(tf_bin: &Path, output_dir: &Path, args: &[String]) -> Command {
-    let mut process = Command::new(tf_bin);
-    process
-        .current_dir(output_dir)
-        .args(args)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-    process
-}
-
-fn terraform_init_command(
-    tf_bin: &Path,
-    output_dir: &Path,
-    global_args: &[String],
-) -> Result<Command> {
-    // Keep requested command output isolated on stdout while retaining init prompts.
-    let stderr = io::stderr()
-        .as_fd()
-        .try_clone_to_owned()
-        .into_diagnostic()?;
-    let args: Vec<_> = global_args
-        .iter()
-        .cloned()
-        .chain(std::iter::once("init".to_owned()))
-        .collect();
-    let mut process = terraform_command(tf_bin, output_dir, &args);
-    process.stdout(Stdio::from(stderr));
-    Ok(process)
-}
-
-fn terraform_subcommand(args: &[String]) -> Option<(usize, &str)> {
-    args.iter()
-        .enumerate()
-        .find(|(_, argument)| !argument.starts_with('-'))
-        .map(|(index, argument)| (index, argument.as_str()))
-}
-
-fn terraform_timeout(args: &[String], explicit: Option<Duration>) -> Option<Duration> {
-    explicit
-        .or_else(|| terraform_reads_remote_state(args).then_some(DEFAULT_TERRAFORM_READ_TIMEOUT))
-}
-
-pub(crate) fn terraform_read_timeout(explicit: Option<Duration>) -> Duration {
-    explicit.unwrap_or(DEFAULT_TERRAFORM_READ_TIMEOUT)
-}
-
-fn terraform_reads_remote_state(args: &[String]) -> bool {
-    let Some((index, command)) = terraform_subcommand(args) else {
-        return false;
-    };
-    match command {
-        "output" => true,
-        "show" => terraform_subcommand(&args[index + 1..]).is_none(),
-        "state" => matches!(
-            terraform_subcommand(&args[index + 1..]).map(|(_, command)| command),
-            Some("list" | "pull" | "show")
-        ),
-        "workspace" => matches!(
-            terraform_subcommand(&args[index + 1..]).map(|(_, command)| command),
-            Some("list" | "show")
-        ),
-        _ => false,
-    }
-}
-
-fn terraform_initialized(output_dir: &Path, global_args: &[String]) -> bool {
-    let working_dir = global_args
-        .iter()
-        .find_map(|argument| argument.strip_prefix("-chdir="))
-        .map_or_else(|| output_dir.to_owned(), |path| output_dir.join(path));
-    working_dir.join(TERRAFORM_INIT_STATE_FILE).is_file()
-}
-
 pub fn run_cue(
     logger: &Logger,
     workspace: &Workspace,
@@ -245,7 +149,7 @@ pub fn run_cue(
         subcommand,
         export_expression(workspace, env, backend_override_value)
     );
-    run_command(
+    terraform::run(
         logger,
         &mut cue_command(cue_bin, workspace, env, backend_override_value, command),
     )
@@ -322,14 +226,14 @@ pub fn run_tf_with_metadata(
         return Ok(export_status);
     }
 
-    let timeout = terraform_timeout(args, timeout).map(CommandTimeout::new);
-    if let Some((index, command)) = terraform_subcommand(args)
+    let timeout = terraform::timeout(args, timeout).map(CommandTimeout::new);
+    if let Some((index, command)) = terraform::subcommand(args)
         && command != "init"
-        && !terraform_initialized(&output_dir, &args[..index])
+        && !terraform::initialized(&output_dir, &args[..index])
     {
-        let init_status = run_command_with_timeout(
+        let init_status = terraform::run_with_timeout(
             logger,
-            &mut terraform_init_command(tf_bin, &output_dir, &args[..index])?,
+            &mut terraform::init_command(tf_bin, &output_dir, &args[..index])?,
             timeout,
         )?;
         if !init_status.success() {
@@ -337,9 +241,9 @@ pub fn run_tf_with_metadata(
         }
     }
 
-    run_command_with_timeout(
+    terraform::run_with_timeout(
         logger,
-        &mut terraform_command(tf_bin, &output_dir, args),
+        &mut terraform::command(tf_bin, &output_dir, args),
         timeout,
     )
 }
@@ -443,54 +347,10 @@ fn export_terraform_expression_to(
     ensure_no_tfmigrate_override(output_dir)?;
     let output_file = output_dir.join(OUTPUT_FILE_NAME);
 
-    run_command(
+    terraform::run(
         logger,
         &mut cue_export_file_command(cue_bin, workspace, expression, &output_file)?,
     )
-}
-
-pub fn run_tf_in(
-    logger: &Logger,
-    tf_bin: &Path,
-    output_dir: &Path,
-    args: &[&str],
-    timeout: Option<Duration>,
-) -> Result<ExitStatus> {
-    let args: Vec<_> = args.iter().map(|argument| (*argument).to_owned()).collect();
-    run_command_with_timeout(
-        logger,
-        &mut terraform_command(tf_bin, output_dir, &args),
-        timeout.map(CommandTimeout::new),
-    )
-}
-
-pub fn output_tf_in(
-    logger: &Logger,
-    tf_bin: &Path,
-    output_dir: &Path,
-    args: &[&str],
-    timeout: Option<Duration>,
-) -> Result<Output> {
-    let args: Vec<_> = args.iter().map(|argument| (*argument).to_owned()).collect();
-    let mut command = terraform_command(tf_bin, output_dir, &args);
-    command.stdin(Stdio::null()).stdout(Stdio::piped());
-    output_command(logger, &mut command, timeout.map(CommandTimeout::new))
-}
-
-pub fn capture_tf_in(
-    logger: &Logger,
-    tf_bin: &Path,
-    output_dir: &Path,
-    args: &[&str],
-    timeout: Option<Duration>,
-) -> Result<Output> {
-    let args: Vec<_> = args.iter().map(|argument| (*argument).to_owned()).collect();
-    let mut command = terraform_command(tf_bin, output_dir, &args);
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    output_command(logger, &mut command, timeout.map(CommandTimeout::new))
 }
 
 pub fn read_migration_metadata(
@@ -627,7 +487,7 @@ pub fn export_historical_backend(
         .map_err(|error| miette::miette!("Failed to create migration directory: {error}"))?;
     ensure_no_tfmigrate_override(output_dir)?;
     let output_file = output_dir.join(OUTPUT_FILE_NAME);
-    run_command(
+    terraform::run(
         logger,
         &mut cue_export_file_command(
             cue_bin,
@@ -666,7 +526,7 @@ pub fn run_tfmigrate(
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
 
-    run_command_with_timeout(logger, &mut command, timeout.map(CommandTimeout::new))
+    terraform::run_with_timeout(logger, &mut command, timeout.map(CommandTimeout::new))
 }
 
 fn ensure_no_tfmigrate_override(output_dir: &Path) -> Result<()> {
@@ -680,106 +540,6 @@ fn ensure_no_tfmigrate_override(output_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn run_command(logger: &Logger, command: &mut Command) -> Result<ExitStatus> {
-    log_command(logger, command);
-    command.status().into_diagnostic()
-}
-
-fn run_command_with_timeout(
-    logger: &Logger,
-    command: &mut Command,
-    timeout: Option<CommandTimeout>,
-) -> Result<ExitStatus> {
-    let Some(timeout) = timeout else {
-        return run_command(logger, command);
-    };
-    log_command(logger, command);
-    let command_string = command_string(command);
-    let mut child = command.spawn().into_diagnostic()?;
-    let Some(status) = child.wait_timeout(timeout.remaining()).into_diagnostic()? else {
-        child.kill().into_diagnostic()?;
-        child.wait().into_diagnostic()?;
-        return Err(miette::miette!(
-            "Command timed out after {}: {command_string}",
-            humantime::format_duration(timeout.duration)
-        ));
-    };
-    Ok(status)
-}
-
-fn output_command(
-    logger: &Logger,
-    command: &mut Command,
-    timeout: Option<CommandTimeout>,
-) -> Result<Output> {
-    let Some(timeout) = timeout else {
-        log_command(logger, command);
-        return command.output().into_diagnostic();
-    };
-    log_command(logger, command);
-    let command_string = command_string(command);
-    let mut child = command.spawn().into_diagnostic()?;
-    let stdout = child.stdout.take().map(|mut stdout| {
-        thread::spawn(move || {
-            let mut output = Vec::new();
-            stdout.read_to_end(&mut output).map(|_| output)
-        })
-    });
-    let stderr = child.stderr.take().map(|mut stderr| {
-        thread::spawn(move || {
-            let mut output = Vec::new();
-            stderr.read_to_end(&mut output).map(|_| output)
-        })
-    });
-    let (status, timed_out) =
-        if let Some(status) = child.wait_timeout(timeout.remaining()).into_diagnostic()? {
-            (status, false)
-        } else {
-            child.kill().into_diagnostic()?;
-            (child.wait().into_diagnostic()?, true)
-        };
-    let stdout = join_output(stdout)?;
-    let stderr = join_output(stderr)?;
-    if timed_out {
-        return Err(miette::miette!(
-            "Command timed out after {}: {command_string}",
-            humantime::format_duration(timeout.duration)
-        ));
-    }
-    Ok(Output {
-        status,
-        stdout,
-        stderr,
-    })
-}
-
-fn join_output(handle: Option<thread::JoinHandle<io::Result<Vec<u8>>>>) -> Result<Vec<u8>> {
-    let Some(handle) = handle else {
-        return Ok(Vec::new());
-    };
-    handle
-        .join()
-        .map_err(|_| miette::miette!("Command output reader panicked"))?
-        .into_diagnostic()
-}
-
-fn command_string(command: &Command) -> String {
-    let program = command.get_program().to_str().unwrap();
-    let args = command.get_args().map(|arg| arg.to_str().unwrap());
-    shell_words::join(std::iter::once(program).chain(args))
-}
-
-fn log_command(logger: &Logger, command: &Command) {
-    info!(
-        logger,
-        "From: {}\n   Running: {}",
-        command
-            .get_current_dir()
-            .map_or(Cow::from("<None>"), Path::to_string_lossy),
-        command_string(command)
-    );
-}
-
 pub fn resolve_tool(path: &Path) -> Result<PathBuf> {
     which::which(path)
         .into_diagnostic()
@@ -789,13 +549,15 @@ pub fn resolve_tool(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CommandTimeout, DEFAULT_TERRAFORM_READ_TIMEOUT, OUTPUT_FOLDER_NAME,
-        TERRAFORM_INIT_STATE_FILE, cue_command, output_command, reconciled_export_expression,
-        replace_root_backend, run_command_with_timeout, run_tf, run_tfmigrate, terraform_timeout,
+        OUTPUT_FOLDER_NAME, cue_command, reconciled_export_expression, replace_root_backend,
+        run_tf, run_tfmigrate,
     };
     use crate::cli::CueCommand;
     use crate::logger::Logger;
     use crate::reconciliation::Reconciliation;
+    use crate::terraform::{
+        CommandTimeout, DEFAULT_READ_TIMEOUT, INIT_STATE_FILE, output, run_with_timeout, timeout,
+    };
     use crate::test_directory::TestDirectory;
     use miette::{IntoDiagnostic, Result};
     use std::ffi::OsStr;
@@ -935,10 +697,7 @@ mod tests {
             vec!["workspace".to_owned(), "list".to_owned()],
             vec!["workspace".to_owned(), "show".to_owned()],
         ] {
-            assert_eq!(
-                terraform_timeout(&args, None),
-                Some(DEFAULT_TERRAFORM_READ_TIMEOUT)
-            );
+            assert_eq!(timeout(&args, None), Some(DEFAULT_READ_TIMEOUT));
         }
     }
 
@@ -950,7 +709,7 @@ mod tests {
             vec!["apply".to_owned()],
             vec!["show".to_owned(), "saved.tfplan".to_owned()],
         ] {
-            assert_eq!(terraform_timeout(&args, None), None);
+            assert_eq!(timeout(&args, None), None);
         }
     }
 
@@ -959,11 +718,11 @@ mod tests {
         let timeout = Duration::from_millis(275);
 
         assert_eq!(
-            terraform_timeout(&["output".to_owned()], Some(timeout)),
+            crate::terraform::timeout(&["output".to_owned()], Some(timeout)),
             Some(timeout)
         );
         assert_eq!(
-            terraform_timeout(&["apply".to_owned()], Some(timeout)),
+            crate::terraform::timeout(&["apply".to_owned()], Some(timeout)),
             Some(timeout)
         );
     }
@@ -976,7 +735,7 @@ mod tests {
         let mut command = Command::new(executable);
         let started = Instant::now();
 
-        let error = run_command_with_timeout(
+        let error = run_with_timeout(
             &Logger::new(false),
             &mut command,
             Some(CommandTimeout::new(Duration::from_millis(25))),
@@ -998,7 +757,7 @@ mod tests {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
         let started = Instant::now();
 
-        let error = output_command(
+        let error = output(
             &Logger::new(false),
             &mut command,
             Some(CommandTimeout::new(Duration::from_millis(25))),
@@ -1160,7 +919,7 @@ cp "$3" '{}'
             None,
         )?;
         let output_dir = workspace.target_dir().join(OUTPUT_FOLDER_NAME).join(&env);
-        let init_state = output_dir.join(TERRAFORM_INIT_STATE_FILE);
+        let init_state = output_dir.join(INIT_STATE_FILE);
         fs::create_dir_all(init_state.parent().expect("state should have parent"))
             .into_diagnostic()?;
         fs::write(init_state, "").into_diagnostic()?;
@@ -1352,7 +1111,7 @@ cp "$3" '{}'
         let workspace = temp.workspace()?;
         let env = "dev".to_owned();
         let output_dir = workspace.target_dir().join(OUTPUT_FOLDER_NAME).join(&env);
-        let init_state = output_dir.join(TERRAFORM_INIT_STATE_FILE);
+        let init_state = output_dir.join(INIT_STATE_FILE);
         fs::create_dir_all(init_state.parent().expect("state should have parent"))
             .into_diagnostic()?;
         fs::write(init_state, "").into_diagnostic()?;
