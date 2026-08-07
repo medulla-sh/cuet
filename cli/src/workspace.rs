@@ -201,7 +201,7 @@ fn find_root(start_path: &Path) -> Result<PathBuf> {
 mod tests {
     use super::{Workspace, discover_modules, find_root, resolve_root};
     use crate::cli::ModuleTarget;
-    use crate::test_support::TestDirectory;
+    use crate::test_directory::TestDirectory;
     use miette::{IntoDiagnostic, Result};
     use std::ffi::OsString;
     use std::fs;

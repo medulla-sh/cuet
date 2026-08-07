@@ -1321,12 +1321,11 @@ mod tests {
         inspected_backend, parse_history_target, run_from, state_snapshot_missing,
     };
     use crate::cli::{Cli, Commands, MigrationCommand, ModuleTarget, ModulesCommand, Target};
-    use crate::test_support::TestDirectory;
+    use crate::test_directory::TestDirectory;
     use miette::{IntoDiagnostic, Result};
     use std::collections::BTreeMap;
-    use std::fs::{self, File};
+    use std::fs;
     use std::io::{self, Write};
-    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
 
     fn modules_cli(temp: &TestDirectory) -> Result<Cli> {
@@ -1377,7 +1376,7 @@ mod tests {
     ) -> Result<(PathBuf, PathBuf, PathBuf, PathBuf)> {
         let cue_bin = temp.path().join("cue");
         let cue_marker = temp.path().join("cue-invocations");
-        write_executable(
+        temp.write_executable(
             &cue_bin,
             &format!(
                 r#"#!/usr/bin/env bash
@@ -1414,7 +1413,7 @@ fi
         )?;
         let tf_bin = temp.path().join("tofu");
         let tf_marker = temp.path().join("tofu-invocations");
-        write_executable(
+        temp.write_executable(
             &tf_bin,
             &format!(
                 r#"#!/usr/bin/env bash
@@ -1456,7 +1455,7 @@ fi
 
         let cue_bin = temp.path().join("cue");
         let cue_expression = temp.path().join("cue-expression");
-        write_executable(
+        temp.write_executable(
             &cue_bin,
             &format!(
                 r#"#!/usr/bin/env bash
@@ -1482,7 +1481,7 @@ fi
         )?;
         let tf_bin = temp.path().join("tofu");
         let applied = temp.path().join("applied");
-        write_executable(
+        temp.write_executable(
             &tf_bin,
             &format!(
                 r#"#!/usr/bin/env bash
@@ -1544,7 +1543,7 @@ esac
         fs::write(module.join("cuet.cue"), "").into_diagnostic()?;
         fs::write(environment_dir.join(".terraform/terraform.tfstate"), "").into_diagnostic()?;
         let cue_bin = temp.path().join("cue");
-        write_executable(
+        temp.write_executable(
             &cue_bin,
             r"#!/usr/bin/env bash
 set -euo pipefail
@@ -1553,7 +1552,7 @@ printf '[]'
         )?;
         let tf_bin = temp.path().join("tofu");
         let invocations = temp.path().join("tofu-invocations");
-        write_executable(
+        temp.write_executable(
             &tf_bin,
             &format!(
                 r#"#!/usr/bin/env bash
@@ -1591,14 +1590,6 @@ if [[ $* == 'output -json' ]]; then printf '{{}}'; fi
             "state list\noutput -json\n"
         );
         Ok(())
-    }
-
-    fn write_executable(path: &Path, body: &str) -> Result<()> {
-        let mut file = File::create(path).into_diagnostic()?;
-        file.write_all(body.as_bytes()).into_diagnostic()?;
-        file.sync_all().into_diagnostic()?;
-        drop(file);
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).into_diagnostic()
     }
 
     #[test]
@@ -1826,7 +1817,7 @@ if [[ $* == 'output -json' ]]; then printf '{{}}'; fi
         fs::write(root.join(".cuetroot.cue"), "").into_diagnostic()?;
         let cue_bin = temp.path().join("cue");
         let marker = temp.path().join("cue-ran");
-        write_executable(
+        temp.write_executable(
             &cue_bin,
             &format!(
                 r#"#!/usr/bin/env bash
@@ -1897,7 +1888,7 @@ fi
     fn test_modules_check_succeeds_without_terraform() -> Result<()> {
         let temp = TestDirectory::new()?;
         let cue_bin = temp.path().join("cue");
-        write_executable(
+        temp.write_executable(
             &cue_bin,
             r#"#!/usr/bin/env bash
 # Fake CUE returns one environment and accepts its export.
@@ -1938,7 +1929,7 @@ fi
         fs::write(from_module.join("cuet.cue"), "").into_diagnostic()?;
         fs::write(to_module.join("cuet.cue"), "").into_diagnostic()?;
         let cue_bin = temp.path().join("cue");
-        write_executable(
+        temp.write_executable(
             &cue_bin,
             r#"#!/usr/bin/env bash
 # Fake CUE returns migration history or writes a requested export file.
@@ -1970,13 +1961,13 @@ printf '{}' > "$output"
 "#,
         )?;
         let tf_bin = temp.path().join("tofu");
-        write_executable(
+        temp.write_executable(
             &tf_bin,
             "#!/usr/bin/env bash\n# Fake OpenTofu is resolved but run by tfmigrate.\nset -euo pipefail\n",
         )?;
         let tfmigrate_bin = temp.path().join("tfmigrate");
         let migration_marker = temp.path().join("migration.json");
-        write_executable(
+        temp.write_executable(
             &tfmigrate_bin,
             &format!(
                 r#"#!/usr/bin/env bash

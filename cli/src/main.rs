@@ -10,7 +10,7 @@ mod environment;
 mod execution;
 mod reconciliation;
 #[cfg(test)]
-mod test_support;
+mod test_directory;
 mod workspace;
 
 fn main() -> Result<()> {

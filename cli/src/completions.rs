@@ -263,7 +263,7 @@ fn module_candidate_matches(candidate: &str, current: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::target_values;
-    use crate::test_support::TestDirectory;
+    use crate::test_directory::TestDirectory;
     use miette::{IntoDiagnostic, Result};
     use std::ffi::OsStr;
     use std::fs;

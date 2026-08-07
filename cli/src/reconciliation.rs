@@ -245,31 +245,12 @@ fn state_missing(stderr: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{environment_names, inspect, provider_name, remove_if_empty};
-    use crate::cli::ModuleTarget;
     use crate::logger::Logger;
-    use crate::test_support::TestDirectory;
+    use crate::test_directory::TestDirectory;
     use crate::workspace::Workspace;
     use miette::{IntoDiagnostic, Result};
-    use std::fs::{self, File};
-    use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
-    use std::path::{Path, PathBuf};
-
-    fn test_workspace(temp: &TestDirectory) -> Result<Workspace> {
-        let root = temp.path().join("workspace");
-        let module = root.join("infra/neon");
-        fs::create_dir_all(&module).into_diagnostic()?;
-        fs::write(root.join(".cuetroot.cue"), "").into_diagnostic()?;
-        Workspace::resolve(&module, None, &ModuleTarget::Relative(PathBuf::from(".")))
-    }
-
-    fn write_executable(path: &Path, body: &str) -> Result<()> {
-        let mut file = File::create(path).into_diagnostic()?;
-        file.write_all(body.as_bytes()).into_diagnostic()?;
-        file.sync_all().into_diagnostic()?;
-        drop(file);
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).into_diagnostic()
-    }
+    use std::fs;
+    use std::path::PathBuf;
 
     fn initialize_environment(workspace: &Workspace, environment: &str) -> Result<PathBuf> {
         let directory = workspace.target_dir().join(".cuet").join(environment);
@@ -311,7 +292,7 @@ mod tests {
     fn test_environment_names_lists_initialized_directories_without_inspecting_state() -> Result<()>
     {
         let temp = TestDirectory::new()?;
-        let workspace = test_workspace(&temp)?;
+        let workspace = temp.workspace()?;
         for environment in ["dev", "legacy"] {
             initialize_environment(&workspace, environment)?;
         }
@@ -329,9 +310,9 @@ mod tests {
     #[test]
     fn test_inspect_reconciles_only_selected_environment() -> Result<()> {
         let temp = TestDirectory::new()?;
-        let workspace = test_workspace(&temp)?;
+        let workspace = temp.workspace()?;
         let tf_bin = temp.path().join("tofu");
-        write_executable(
+        temp.write_executable(
             &tf_bin,
             r#"#!/usr/bin/env bash
 set -euo pipefail

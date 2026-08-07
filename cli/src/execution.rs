@@ -793,40 +793,21 @@ mod tests {
         TERRAFORM_INIT_STATE_FILE, cue_command, output_command, reconciled_export_expression,
         replace_root_backend, run_command_with_timeout, run_tf, run_tfmigrate, terraform_timeout,
     };
-    use crate::cli::{CueCommand, ModuleTarget};
+    use crate::cli::CueCommand;
     use crate::logger::Logger;
     use crate::reconciliation::Reconciliation;
-    use crate::test_support::TestDirectory;
-    use crate::workspace::Workspace;
+    use crate::test_directory::TestDirectory;
     use miette::{IntoDiagnostic, Result};
     use std::ffi::OsStr;
-    use std::fs::{self, File};
-    use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
-    use std::path::{Path, PathBuf};
+    use std::fs;
+    use std::path::Path;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
-
-    fn write_executable(path: &Path, body: &str) -> Result<()> {
-        let mut file = File::create(path).into_diagnostic()?;
-        file.write_all(body.as_bytes()).into_diagnostic()?;
-        file.sync_all().into_diagnostic()?;
-        drop(file);
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).into_diagnostic()
-    }
-
-    fn test_workspace(temp: &TestDirectory) -> Result<Workspace> {
-        let root = temp.path().join("workspace");
-        let module = root.join("infra/neon");
-        fs::create_dir_all(&module).into_diagnostic()?;
-        fs::write(root.join(".cuetroot.cue"), "").into_diagnostic()?;
-        Workspace::resolve(&module, None, &ModuleTarget::Relative(PathBuf::from(".")))
-    }
 
     #[test]
     fn test_cue_command_uses_module_metadata() -> Result<()> {
         let temp = TestDirectory::new()?;
-        let workspace = test_workspace(&temp)?;
+        let workspace = temp.workspace()?;
         let env = "dev".to_owned();
         let command = cue_command(
             Path::new("cue"),
@@ -861,7 +842,7 @@ mod tests {
     #[test]
     fn test_reconciled_export_expression_injects_historical_providers() -> Result<()> {
         let temp = TestDirectory::new()?;
-        let workspace = test_workspace(&temp)?;
+        let workspace = temp.workspace()?;
         let reconciliation = Reconciliation {
             environment: "global".to_owned(),
             required_providers: vec!["google".to_owned(), "neon".to_owned()],
@@ -991,7 +972,7 @@ mod tests {
     fn test_command_timeout_kills_and_reaps_process() -> Result<()> {
         let temp = TestDirectory::new()?;
         let executable = temp.path().join("slow-command");
-        write_executable(&executable, "#!/bin/sh\nexec sleep 10\n")?;
+        temp.write_executable(&executable, "#!/bin/sh\nexec sleep 10\n")?;
         let mut command = Command::new(executable);
         let started = Instant::now();
 
@@ -1012,7 +993,7 @@ mod tests {
     fn test_output_timeout_kills_and_reaps_process() -> Result<()> {
         let temp = TestDirectory::new()?;
         let executable = temp.path().join("slow-command");
-        write_executable(&executable, "#!/bin/sh\nprintf output\nexec sleep 10\n")?;
+        temp.write_executable(&executable, "#!/bin/sh\nprintf output\nexec sleep 10\n")?;
         let mut command = Command::new(executable);
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
         let started = Instant::now();
@@ -1036,7 +1017,7 @@ mod tests {
         let tfmigrate_bin = temp.path().join("tfmigrate");
         let marker = temp.path().join("migration.json");
         let invocation = temp.path().join("invocation");
-        write_executable(
+        temp.write_executable(
             &tfmigrate_bin,
             &format!(
                 r#"#!/usr/bin/env bash
@@ -1099,12 +1080,12 @@ cp "$3" '{}'
         let cue_bin = temp.path().join("cue");
         let tf_bin = temp.path().join("tofu");
         let tf_marker = temp.path().join("tofu-ran");
-        write_executable(&cue_bin, "#!/bin/sh\nexit 23\n")?;
-        write_executable(
+        temp.write_executable(&cue_bin, "#!/bin/sh\nexit 23\n")?;
+        temp.write_executable(
             &tf_bin,
             &format!("#!/bin/sh\ntouch '{}'\n", tf_marker.display()),
         )?;
-        let workspace = test_workspace(&temp)?;
+        let workspace = temp.workspace()?;
         let env = "dev".to_owned();
 
         let status = run_tf(
@@ -1128,12 +1109,12 @@ cp "$3" '{}'
         let temp = TestDirectory::new()?;
         let cue_bin = temp.path().join("cue");
         let tf_bin = temp.path().join("tofu");
-        write_executable(&cue_bin, "#!/bin/sh\nexit 0\n")?;
-        write_executable(
+        temp.write_executable(&cue_bin, "#!/bin/sh\nexit 0\n")?;
+        temp.write_executable(
             &tf_bin,
             "#!/bin/sh\nif [ \"$1\" = init ]; then exit 0; fi\nexit 19\n",
         )?;
-        let workspace = test_workspace(&temp)?;
+        let workspace = temp.workspace()?;
         let env = "dev".to_owned();
 
         let status = run_tf(
@@ -1157,15 +1138,15 @@ cp "$3" '{}'
         let cue_bin = temp.path().join("cue");
         let tf_bin = temp.path().join("tofu");
         let tf_marker = temp.path().join("tofu-ran");
-        write_executable(&cue_bin, "#!/bin/sh\nexit 0\n")?;
-        write_executable(
+        temp.write_executable(&cue_bin, "#!/bin/sh\nexit 0\n")?;
+        temp.write_executable(
             &tf_bin,
             &format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
                 tf_marker.display()
             ),
         )?;
-        let workspace = test_workspace(&temp)?;
+        let workspace = temp.workspace()?;
         let env = "dev".to_owned();
 
         let fresh_status = run_tf(
@@ -1209,15 +1190,15 @@ cp "$3" '{}'
         let cue_bin = temp.path().join("cue");
         let tf_bin = temp.path().join("tofu");
         let tf_marker = temp.path().join("tofu-ran");
-        write_executable(&cue_bin, "#!/bin/sh\nexit 0\n")?;
-        write_executable(
+        temp.write_executable(&cue_bin, "#!/bin/sh\nexit 0\n")?;
+        temp.write_executable(
             &tf_bin,
             &format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexec sleep 10\n",
                 tf_marker.display()
             ),
         )?;
-        let workspace = test_workspace(&temp)?;
+        let workspace = temp.workspace()?;
         let env = "dev".to_owned();
 
         let error = run_tf(
@@ -1243,15 +1224,15 @@ cp "$3" '{}'
         let cue_bin = temp.path().join("cue");
         let tf_bin = temp.path().join("tofu");
         let tf_marker = temp.path().join("tofu-ran");
-        write_executable(&cue_bin, "#!/bin/sh\nexit 0\n")?;
-        write_executable(
+        temp.write_executable(&cue_bin, "#!/bin/sh\nexit 0\n")?;
+        temp.write_executable(
             &tf_bin,
             &format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
                 tf_marker.display()
             ),
         )?;
-        let workspace = test_workspace(&temp)?;
+        let workspace = temp.workspace()?;
         let env = "dev".to_owned();
         fs::create_dir_all(
             workspace
@@ -1287,15 +1268,15 @@ cp "$3" '{}'
         let cue_bin = temp.path().join("cue");
         let tf_bin = temp.path().join("tofu");
         let tf_marker = temp.path().join("tofu-ran");
-        write_executable(&cue_bin, "#!/bin/sh\nexit 0\n")?;
-        write_executable(
+        temp.write_executable(&cue_bin, "#!/bin/sh\nexit 0\n")?;
+        temp.write_executable(
             &tf_bin,
             &format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = init ]; then exit 17; fi\n",
                 tf_marker.display()
             ),
         )?;
-        let workspace = test_workspace(&temp)?;
+        let workspace = temp.workspace()?;
         let env = "dev".to_owned();
 
         let status = run_tf(
@@ -1320,15 +1301,15 @@ cp "$3" '{}'
         let cue_bin = temp.path().join("cue");
         let tf_bin = temp.path().join("tofu");
         let tf_marker = temp.path().join("tofu-ran");
-        write_executable(&cue_bin, "#!/bin/sh\nexit 0\n")?;
-        write_executable(
+        temp.write_executable(&cue_bin, "#!/bin/sh\nexit 0\n")?;
+        temp.write_executable(
             &tf_bin,
             &format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
                 tf_marker.display()
             ),
         )?;
-        let workspace = test_workspace(&temp)?;
+        let workspace = temp.workspace()?;
         let env = "dev".to_owned();
 
         let status = run_tf(
@@ -1360,15 +1341,15 @@ cp "$3" '{}'
         let cue_bin = temp.path().join("cue");
         let tf_bin = temp.path().join("tofu");
         let tf_marker = temp.path().join("tofu-ran");
-        write_executable(&cue_bin, "#!/bin/sh\nexit 0\n")?;
-        write_executable(
+        temp.write_executable(&cue_bin, "#!/bin/sh\nexit 0\n")?;
+        temp.write_executable(
             &tf_bin,
             &format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
                 tf_marker.display()
             ),
         )?;
-        let workspace = test_workspace(&temp)?;
+        let workspace = temp.workspace()?;
         let env = "dev".to_owned();
         let output_dir = workspace.target_dir().join(OUTPUT_FOLDER_NAME).join(&env);
         let init_state = output_dir.join(TERRAFORM_INIT_STATE_FILE);

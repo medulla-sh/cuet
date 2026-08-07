@@ -127,36 +127,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::{command, discover, populated, select_with};
-    use crate::cli::ModuleTarget;
-    use crate::test_support::TestDirectory;
-    use crate::workspace::Workspace;
-    use miette::{IntoDiagnostic, Result};
+    use crate::test_directory::TestDirectory;
+    use miette::Result;
     use std::ffi::OsStr;
-    use std::fs::{self, File};
-    use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
-    use std::path::{Path, PathBuf};
-
-    fn test_workspace(temp: &TestDirectory) -> Result<Workspace> {
-        let root = temp.path().join("workspace");
-        let module = root.join("infra/neon");
-        fs::create_dir_all(&module).into_diagnostic()?;
-        fs::write(root.join(".cuetroot.cue"), "").into_diagnostic()?;
-        Workspace::resolve(&module, None, &ModuleTarget::Relative(PathBuf::from(".")))
-    }
-
-    fn write_executable(path: &Path, body: &str) -> Result<()> {
-        let mut file = File::create(path).into_diagnostic()?;
-        file.write_all(body.as_bytes()).into_diagnostic()?;
-        file.sync_all().into_diagnostic()?;
-        drop(file);
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).into_diagnostic()
-    }
+    use std::path::Path;
 
     #[test]
     fn test_environment_command_queries_populated_input() -> Result<()> {
         let temp = TestDirectory::new()?;
-        let workspace = test_workspace(&temp)?;
+        let workspace = temp.workspace()?;
 
         let command = command(Path::new("cue"), &workspace, "null");
 
@@ -180,11 +159,11 @@ mod tests {
     fn test_populated_returns_set() -> Result<()> {
         let temp = TestDirectory::new()?;
         let cue_bin = temp.path().join("cue");
-        write_executable(
+        temp.write_executable(
             &cue_bin,
             "#!/usr/bin/env bash\nset -euo pipefail\nprintf '[\"prod\",\"dev\",\"dev\"]'\n",
         )?;
-        let workspace = test_workspace(&temp)?;
+        let workspace = temp.workspace()?;
 
         let environments = populated(&cue_bin, &workspace, "null")?;
 
@@ -199,11 +178,11 @@ mod tests {
     fn test_discover_reports_cue_failure() -> Result<()> {
         let temp = TestDirectory::new()?;
         let cue_bin = temp.path().join("cue");
-        write_executable(
+        temp.write_executable(
             &cue_bin,
             "#!/usr/bin/env bash\nset -euo pipefail\nprintf 'invalid module' >&2\nexit 17\n",
         )?;
-        let workspace = test_workspace(&temp)?;
+        let workspace = temp.workspace()?;
 
         let error = discover(&cue_bin, &workspace, "null")
             .expect_err("failed CUE query should be reported");
@@ -217,11 +196,11 @@ mod tests {
     fn test_populated_rejects_invalid_environment_name() -> Result<()> {
         let temp = TestDirectory::new()?;
         let cue_bin = temp.path().join("cue");
-        write_executable(
+        temp.write_executable(
             &cue_bin,
             "#!/usr/bin/env bash\nset -euo pipefail\nprintf '[\"invalid/name\"]'\n",
         )?;
-        let workspace = test_workspace(&temp)?;
+        let workspace = temp.workspace()?;
 
         let error = populated(&cue_bin, &workspace, "null")
             .expect_err("invalid environment should be rejected");
