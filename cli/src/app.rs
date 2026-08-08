@@ -2,18 +2,18 @@ use crate::cli::{Cli, Commands, CueCommand, Env, MigrationCommand, ModulesComman
 use crate::completions;
 use crate::environment;
 use crate::execution::{
-    TerraformMetadata, capture_tf_in, check_cue_export, export_historical_backend,
-    export_terraform, export_terraform_to, export_terraform_with_backend_to, output_tf_in,
-    read_backend_config, read_migration_metadata, read_terraform_config, replace_root_backend,
-    resolve_tool, run_cue, run_tf_in, run_tf_with_metadata, run_tfmigrate,
+    TerraformMetadata, capture_tf_in, check_cue_export, export_terraform, export_terraform_to,
+    export_terraform_with_backend_to, output_tf_in, read_backend_config, read_migration_metadata,
+    read_terraform_config, replace_root_backend, resolve_tool, run_cue, run_tf_in,
+    run_tf_with_metadata,
 };
 use crate::logger::Logger;
 use crate::migration::{
     DestinationAction, MigrationEndpoint, MigrationMetadata, ModuleMigrationInspection,
-    ResourceTransition, StateSnapshot, StateSnapshotMetadata, destination_action,
-    ensure_default_workspace, ensure_migrated_snapshot, ensure_module_migration_files,
-    ensure_single_source, has_required_providers, inspected_backend, migration_document,
-    parse_history_target, resource_actions, state_snapshot_missing,
+    ResourceMigrationRunner, ResourceTransition, StateSnapshot, StateSnapshotMetadata,
+    destination_action, ensure_default_workspace, ensure_migrated_snapshot,
+    ensure_module_migration_files, has_required_providers, inspected_backend, parse_history_target,
+    state_snapshot_missing,
 };
 use crate::reconciliation;
 use crate::workspace::{Workspace, discover_modules, resolve_root};
@@ -28,7 +28,6 @@ use std::time::Duration;
 
 const DEFAULT_CUE_BIN: &str = "cue";
 const DEFAULT_TF_BIN: &str = "tofu";
-const DEFAULT_TFMIGRATE_BIN: &str = "tfmigrate";
 const LOCAL_BACKEND_OVERRIDE_VALUE: &str = r#""local.tfstate""#;
 
 #[derive(Clone, Copy, Debug)]
@@ -289,17 +288,6 @@ struct MigrationRunner<'a> {
     backend_override_value: &'a str,
 }
 
-struct PreparedMigration {
-    source_dir: PathBuf,
-    actions: Vec<String>,
-    from_skip_plan: bool,
-}
-
-enum Preparation {
-    Ready(PreparedMigration),
-    CommandFailed(ExitStatus),
-}
-
 impl MigrationRunner<'_> {
     fn tf_bin(&self) -> Result<&std::path::Path> {
         self.tf_bin
@@ -328,54 +316,17 @@ impl MigrationRunner<'_> {
             return self.run_module(command, target, output);
         }
 
-        if matches!(command, MigrationCommand::Check) {
-            if transitions.is_empty() {
-                return Err(miette::miette!(
-                    "No migration history exists for {}:{}",
-                    self.workspace.module_name(),
-                    self.env
-                ));
-            }
-            return Ok(None);
-        }
-        if matches!(command, MigrationCommand::Inspect) {
-            serde_json::to_writer_pretty(&mut *output, &metadata).into_diagnostic()?;
-            writeln!(output).into_diagnostic()?;
-            return Ok(None);
-        }
-
-        let (status, destination_dir) = self.export_destination()?;
-        if !status.success() {
-            return Ok(Some(status));
-        }
-        let prepared = match self.prepare_resources(&transitions, &destination_dir)? {
-            Preparation::Ready(prepared) => prepared,
-            Preparation::CommandFailed(status) => return Ok(Some(status)),
-        };
-
-        let migration = migration_document(
-            &prepared.source_dir,
-            prepared.from_skip_plan,
-            &prepared.actions,
-        );
-        let tfmigrate_bin = resolve_tool(
-            self.tfmigrate_path
-                .unwrap_or_else(|| std::path::Path::new(DEFAULT_TFMIGRATE_BIN)),
-        )?;
-        let (operation, args) = command
-            .tfmigrate_command_and_args()
-            .ok_or_else(|| miette::miette!("Migration command requires no tfmigrate operation"))?;
-        run_tfmigrate(
+        ResourceMigrationRunner::new(
             self.logger,
-            &tfmigrate_bin,
-            self.tf_bin()?,
-            operation,
-            args,
-            &destination_dir,
-            &migration,
+            self.workspace,
+            self.env,
+            self.cue_bin,
+            self.tf_bin,
+            self.tfmigrate_path,
             self.timeout,
+            self.backend_override_value,
         )
-        .map(Some)
+        .run(command, &metadata, &transitions, output)
     }
 
     fn current_transitions<'m>(
@@ -778,69 +729,6 @@ impl MigrationRunner<'_> {
                 })?;
         }
         Ok(())
-    }
-
-    fn prepare_resources(
-        &self,
-        transitions: &[&ResourceTransition],
-        destination_dir: &std::path::Path,
-    ) -> Result<Preparation> {
-        let Some(first) = transitions.first() else {
-            return Err(miette::miette!(
-                "No cross-state history exists for {}:{}",
-                self.workspace.module_name(),
-                self.env
-            ));
-        };
-        ensure_single_source(transitions)?;
-        let source_workspace = Workspace::resolve_workspace_relative(
-            self.workspace.root(),
-            Some(self.workspace.root()),
-            std::path::Path::new(&first.from.module),
-        )?;
-        let (status, source_dir, from_skip_plan) =
-            self.export_resource_source(&source_workspace, first, destination_dir)?;
-        if !status.success() {
-            return Ok(Preparation::CommandFailed(status));
-        }
-
-        Ok(Preparation::Ready(PreparedMigration {
-            source_dir,
-            actions: resource_actions(transitions),
-            from_skip_plan,
-        }))
-    }
-
-    fn export_resource_source(
-        &self,
-        source_workspace: &Workspace,
-        transition: &ResourceTransition,
-        destination_dir: &std::path::Path,
-    ) -> Result<(ExitStatus, PathBuf, bool)> {
-        let populated =
-            environment::populated(self.cue_bin, source_workspace, self.backend_override_value)?;
-        if populated.contains(&transition.from.env) {
-            let (status, source_dir) = export_terraform(
-                self.logger,
-                source_workspace,
-                &transition.from.env,
-                self.cue_bin,
-                self.backend_override_value,
-            )?;
-            return Ok((status, source_dir, false));
-        }
-
-        let source_dir = destination_dir.join(".tfmigrate/from");
-        let status = export_historical_backend(
-            self.logger,
-            source_workspace,
-            &transition.from.module,
-            &transition.from.env,
-            self.cue_bin,
-            self.backend_override_value,
-            &source_dir,
-        )?;
-        Ok((status, source_dir, true))
     }
 }
 
