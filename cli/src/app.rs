@@ -1,4 +1,4 @@
-use crate::cli::{Cli, Commands, CueCommand, Env, MigrationCommand, ModulesCommand, validate_env};
+use crate::cli::{Cli, Commands, CueCommand, Env, MigrationCommand, ModulesCommand};
 use crate::completions;
 use crate::environment;
 use crate::execution::{
@@ -9,16 +9,16 @@ use crate::execution::{
 };
 use crate::logger::Logger;
 use crate::migration::{
-    DestinationAction, StateSnapshot, StateSnapshotMetadata, destination_action,
+    DestinationAction, MigrationEndpoint, MigrationMetadata, ModuleMigrationInspection,
+    ResourceTransition, StateSnapshot, StateSnapshotMetadata, destination_action,
     ensure_default_workspace, ensure_migrated_snapshot, ensure_module_migration_files,
-    state_snapshot_missing,
+    ensure_single_source, has_required_providers, inspected_backend, migration_document,
+    parse_history_target, resource_actions, state_snapshot_missing,
 };
 use crate::reconciliation;
 use crate::workspace::{Workspace, discover_modules, resolve_root};
 use clap::CommandFactory;
 use miette::{IntoDiagnostic, Result};
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 use std::io::{self, Write};
 use std::path::Component;
 use std::path::PathBuf;
@@ -260,69 +260,6 @@ fn log_target_configuration(
     );
 }
 
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct MigrationMetadata {
-    module_history: Vec<String>,
-    resource_transitions: Vec<ResourceTransition>,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ResourceTransition {
-    resource_type: String,
-    from: ResourceIdentity,
-    to: ResourceIdentity,
-}
-
-#[derive(Deserialize, Serialize)]
-struct ResourceIdentity {
-    module: String,
-    env: Env,
-    name: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct MigrationEndpoint<'a> {
-    module: &'a str,
-    environment: &'a str,
-    backend: serde_json::Value,
-    backend_location_complete: bool,
-    lock_file: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ModuleMigrationInspection<'a> {
-    kind: &'static str,
-    source: MigrationEndpoint<'a>,
-    destination: MigrationEndpoint<'a>,
-}
-
-#[derive(Serialize)]
-struct MigrationDocument<'a> {
-    migration: MigrationBody<'a>,
-}
-
-#[derive(Serialize)]
-struct MigrationBody<'a> {
-    multi_state: MultiStateMigration<'a>,
-}
-
-#[derive(Serialize)]
-struct MultiStateMigration<'a> {
-    cuet: CuetMigration<'a>,
-}
-
-#[derive(Serialize)]
-struct CuetMigration<'a> {
-    from_dir: &'a std::path::Path,
-    from_skip_plan: bool,
-    to_dir: &'static str,
-    actions: &'a [String],
-}
-
 struct MigrationDirectory(PathBuf);
 
 impl MigrationDirectory {
@@ -416,7 +353,11 @@ impl MigrationRunner<'_> {
             Preparation::CommandFailed(status) => return Ok(Some(status)),
         };
 
-        let migration = migration_document(&prepared);
+        let migration = migration_document(
+            &prepared.source_dir,
+            prepared.from_skip_plan,
+            &prepared.actions,
+        );
         let tfmigrate_bin = resolve_tool(
             self.tfmigrate_path
                 .unwrap_or_else(|| std::path::Path::new(DEFAULT_TFMIGRATE_BIN)),
@@ -926,126 +867,10 @@ fn module_lock_path(module: &str, env: &str) -> String {
         .into_owned()
 }
 
-fn root_backend_mut(config: &mut serde_json::Value) -> Result<&mut serde_json::Value> {
-    config
-        .get_mut("terraform")
-        .and_then(|terraform| terraform.get_mut("backend"))
-        .ok_or_else(|| miette::miette!("Terraform configuration has no root backend"))
-}
-
-fn inspected_backend(mut config: serde_json::Value) -> Result<(serde_json::Value, bool)> {
-    const LOCATION_FIELDS: [&str; 14] = [
-        "bucket",
-        "container_name",
-        "hostname",
-        "key",
-        "namespace",
-        "organization",
-        "path",
-        "prefix",
-        "project",
-        "region",
-        "resource_group_name",
-        "secret_suffix",
-        "storage_account_name",
-        "workspace_key_prefix",
-    ];
-    let backend = root_backend_mut(&mut config)?
-        .as_object_mut()
-        .ok_or_else(|| miette::miette!("Terraform root backend must be an object"))?;
-    if backend.len() != 1 {
-        return Err(miette::miette!(
-            "Terraform root backend must contain exactly one backend type"
-        ));
-    }
-    let (backend_type, backend_config) = std::mem::take(backend)
-        .into_iter()
-        .next()
-        .ok_or_else(|| miette::miette!("Terraform root backend is empty"))?;
-    let serde_json::Value::Object(backend_config) = backend_config else {
-        return Err(miette::miette!(
-            "Terraform backend configuration must be an object"
-        ));
-    };
-    let safe_config = backend_config
-        .into_iter()
-        .filter(|(key, _)| {
-            LOCATION_FIELDS.contains(&key.as_str())
-                || backend_type == "consul" && key == "address"
-                || backend_type == "remote" && key == "workspaces"
-        })
-        .collect();
-    let complete = matches!(backend_type.as_str(), "gcs" | "local");
-    let mut backend = serde_json::Map::new();
-    backend.insert(backend_type, serde_json::Value::Object(safe_config));
-    Ok((serde_json::Value::Object(backend), complete))
-}
-
-fn has_required_providers(config: &serde_json::Value) -> bool {
-    config
-        .get("terraform")
-        .and_then(|terraform| terraform.get("required_providers"))
-        .and_then(serde_json::Value::as_object)
-        .is_some_and(|providers| !providers.is_empty())
-}
-
 fn state_snapshot_metadata(output: &[u8]) -> Result<StateSnapshotMetadata> {
     serde_json::from_slice(output)
         .into_diagnostic()
         .map_err(|error| miette::miette!("Failed to read state snapshot metadata: {error}"))
-}
-
-fn ensure_single_source(transitions: &[&ResourceTransition]) -> Result<()> {
-    let sources: BTreeSet<_> = transitions
-        .iter()
-        .map(|transition| (&transition.from.module, &transition.from.env))
-        .collect();
-    if sources.len() != 1 {
-        return Err(miette::miette!(
-            "Pending resource migrations must originate from one module environment"
-        ));
-    }
-    Ok(())
-}
-
-fn resource_actions(transitions: &[&ResourceTransition]) -> Vec<String> {
-    let mut actions: Vec<_> = transitions
-        .iter()
-        .map(|transition| {
-            shell_words::join([
-                "mv",
-                &format!("{}.{}", transition.resource_type, transition.from.name),
-                &format!("{}.{}", transition.resource_type, transition.to.name),
-            ])
-        })
-        .collect();
-    actions.sort();
-    actions
-}
-
-fn migration_document(prepared: &PreparedMigration) -> MigrationDocument<'_> {
-    MigrationDocument {
-        migration: MigrationBody {
-            multi_state: MultiStateMigration {
-                cuet: CuetMigration {
-                    from_dir: &prepared.source_dir,
-                    from_skip_plan: prepared.from_skip_plan,
-                    to_dir: ".",
-                    actions: &prepared.actions,
-                },
-            },
-        },
-    }
-}
-
-fn parse_history_target<'a>(target: &'a str, default_env: &'a str) -> Result<(&'a str, &'a str)> {
-    let (module, env) = target.split_once(':').unwrap_or((target, default_env));
-    let module = module.strip_prefix('/').unwrap_or(module);
-    if module.is_empty() {
-        return Err(miette::miette!("History target module cannot be empty"));
-    }
-    validate_env(env).map_err(|error| miette::miette!(error))?;
-    Ok((module, env))
 }
 
 fn run_modules(
@@ -1192,12 +1017,12 @@ fn check_modules(
 
 #[cfg(test)]
 mod tests {
-    use super::{inspected_backend, parse_history_target, run_from};
+    use super::run_from;
     use crate::cli::{Cli, Commands, MigrationCommand, ModuleTarget, ModulesCommand, Target};
     use crate::migration::{
         DestinationAction, StateSnapshot, StateSnapshotMetadata, destination_action,
         ensure_default_workspace, ensure_migrated_snapshot, ensure_module_migration_files,
-        state_snapshot_missing,
+        inspected_backend, parse_history_target, state_snapshot_missing,
     };
     use crate::test_directory::TestDirectory;
     use miette::{IntoDiagnostic, Result};
