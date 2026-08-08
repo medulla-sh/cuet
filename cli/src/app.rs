@@ -2,16 +2,15 @@ use crate::cli::{Cli, Commands, CueCommand, Env, MigrationCommand, ModulesComman
 use crate::completions;
 use crate::environment;
 use crate::execution::{
-    TerraformMetadata, check_cue_export, export_terraform, export_terraform_to, output_tf_in,
-    read_backend_config, read_migration_metadata, read_terraform_config, replace_root_backend,
-    resolve_tool, run_cue, run_tf_in, run_tf_with_metadata,
+    TerraformMetadata, check_cue_export, export_terraform, read_backend_config,
+    read_migration_metadata, read_terraform_config, replace_root_backend, resolve_tool, run_cue,
+    run_tf_with_metadata,
 };
 use crate::logger::Logger;
 use crate::migration::{
-    DestinationAction, MigrationEndpoint, MigrationMetadata, ModuleMigrationInspection,
-    ModuleMigrationPlanner, ResourceMigrationRunner, ResourceTransition, StateSnapshot,
-    destination_action, ensure_migrated_snapshot, ensure_module_migration_files,
-    has_required_providers, inspected_backend, parse_history_target, state_snapshot_metadata,
+    MigrationDirectory, MigrationEndpoint, MigrationMetadata, ModuleMigrationApplier,
+    ModuleMigrationInspection, ModuleMigrationPlanner, ResourceMigrationRunner, ResourceTransition,
+    ensure_module_migration_files, has_required_providers, inspected_backend, parse_history_target,
 };
 use crate::reconciliation;
 use crate::workspace::{Workspace, discover_modules, resolve_root};
@@ -257,24 +256,6 @@ fn log_target_configuration(
     );
 }
 
-struct MigrationDirectory(PathBuf);
-
-impl MigrationDirectory {
-    fn new(path: PathBuf) -> Self {
-        Self(path)
-    }
-
-    fn path(&self) -> &std::path::Path {
-        &self.0
-    }
-}
-
-impl Drop for MigrationDirectory {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
 struct MigrationRunner<'a> {
     logger: &'a Logger,
     workspace: &'a Workspace,
@@ -485,140 +466,9 @@ impl MigrationRunner<'_> {
             return Ok(Some(status));
         }
 
-        self.apply_module(source_module, source_env, migration_dir.path())
+        ModuleMigrationApplier::new(self.module_planner()?)
+            .apply(source_module, source_env, migration_dir.path())
             .map(Some)
-    }
-
-    fn apply_module(
-        &self,
-        source_module: &str,
-        source_env: &str,
-        migration_dir: &std::path::Path,
-    ) -> Result<ExitStatus> {
-        let planner = self.module_planner()?;
-        let status = planner.prepare_source(source_module, source_env, migration_dir)?;
-        if !status.success() {
-            return Ok(status);
-        }
-        let StateSnapshot::Present(source_metadata) = planner.read_state_snapshot(migration_dir)?
-        else {
-            return Err(miette::miette!(
-                "Source state is missing; cannot verify that the migration was previously applied"
-            ));
-        };
-
-        let destination_dir = MigrationDirectory::new(
-            migration_dir.with_file_name(format!("{}.destination", self.env)),
-        );
-        let status = self.prepare_module_destination(destination_dir.path())?;
-        if !status.success() {
-            return Ok(status);
-        }
-        if matches!(
-            destination_action(
-                &source_metadata,
-                &planner.read_state_snapshot(destination_dir.path())?
-            )?,
-            DestinationAction::Current
-        ) {
-            return run_tf_in(
-                self.logger,
-                self.tf_bin()?,
-                destination_dir.path(),
-                &["plan", "-detailed-exitcode", "-lock-timeout=5m"],
-                self.timeout,
-            );
-        }
-        let status = export_terraform_to(
-            self.logger,
-            self.workspace,
-            self.env,
-            self.cue_bin,
-            "null",
-            migration_dir,
-        )?;
-        if !status.success() {
-            return Ok(status);
-        }
-        let status = run_tf_in(
-            self.logger,
-            self.tf_bin()?,
-            migration_dir,
-            &[
-                "init",
-                "-migrate-state",
-                "-lockfile=readonly",
-                "-lock-timeout=5m",
-            ],
-            self.timeout,
-        )?;
-        if !status.success() {
-            return Ok(status);
-        }
-        let destination_state = output_tf_in(
-            self.logger,
-            self.tf_bin()?,
-            migration_dir,
-            &["state", "pull"],
-            self.timeout,
-        )?;
-        if !destination_state.status.success() {
-            return Ok(destination_state.status);
-        }
-        let destination_metadata = state_snapshot_metadata(&destination_state.stdout)?;
-        ensure_migrated_snapshot(&source_metadata, &destination_metadata)?;
-        run_tf_in(
-            self.logger,
-            self.tf_bin()?,
-            migration_dir,
-            &["plan", "-detailed-exitcode", "-lock-timeout=5m"],
-            self.timeout,
-        )
-    }
-
-    fn prepare_module_destination(&self, destination_dir: &std::path::Path) -> Result<ExitStatus> {
-        if destination_dir.exists() {
-            std::fs::remove_dir_all(destination_dir).into_diagnostic()?;
-        }
-        let status = export_terraform_to(
-            self.logger,
-            self.workspace,
-            self.env,
-            self.cue_bin,
-            "null",
-            destination_dir,
-        )?;
-        if !status.success() {
-            return Ok(status);
-        }
-        self.copy_provider_lock(destination_dir)?;
-        run_tf_in(
-            self.logger,
-            self.tf_bin()?,
-            destination_dir,
-            &["init", "-input=false", "-lockfile=readonly"],
-            self.timeout,
-        )
-    }
-
-    fn copy_provider_lock(&self, destination_dir: &std::path::Path) -> Result<()> {
-        let source = self
-            .workspace
-            .target_dir()
-            .join(".cuet")
-            .join(self.env)
-            .join(".terraform.lock.hcl");
-        if source.is_file() {
-            std::fs::copy(&source, destination_dir.join(".terraform.lock.hcl"))
-                .into_diagnostic()
-                .map_err(|error| {
-                    miette::miette!(
-                        "Failed to copy provider lock from '{}': {error}",
-                        source.display()
-                    )
-                })?;
-        }
-        Ok(())
     }
 }
 
