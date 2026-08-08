@@ -1,9 +1,10 @@
-use crate::cli::{CueCommand, Env};
+use crate::cli::CueCommand;
 use crate::logger::Logger;
 use crate::reconciliation::Reconciliation;
 use crate::terraform::{self, CommandTimeout};
 use crate::workspace::Workspace;
 use miette::{IntoDiagnostic, Result};
+use serde::de::DeserializeOwned;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Output, Stdio};
 use std::time::Duration;
@@ -27,7 +28,7 @@ fn metadata_expression(workspace: &Workspace, backend_override_value: &str) -> S
 }
 
 fn metadata_expression_for_module(module: &str, backend_override_value: &str) -> String {
-    let module = serde_json::Value::String(module.to_owned());
+    let module = serde_json::to_string(module).expect("module name should always serialize");
     format!(
         "{{ #metadata: {{ module: {module}, localBackendOverride: {backend_override_value} }} }}"
     )
@@ -41,7 +42,8 @@ fn reconciled_metadata_expression(
     let Some(reconciliation) = reconciliation else {
         return metadata_expression(workspace, backend_override_value);
     };
-    let module = serde_json::Value::String(workspace.module_name().to_owned());
+    let module = serde_json::to_string(workspace.module_name())
+        .expect("module name should always serialize");
     let reconciliation = serde_json::to_string(reconciliation)
         .expect("reconciliation metadata should always serialize");
     format!(
@@ -49,24 +51,24 @@ fn reconciled_metadata_expression(
     )
 }
 
-fn migration_expression(workspace: &Workspace, env: &Env, backend_override_value: &str) -> String {
-    let environment = serde_json::Value::String(env.clone());
+fn migration_expression(workspace: &Workspace, env: &str, backend_override_value: &str) -> String {
+    let environment = serde_json::to_string(env).expect("environment should always serialize");
     format!(
         "((infra & {}).#migration)[{environment}]",
         metadata_expression(workspace, backend_override_value)
     )
 }
 
-fn backend_expression(module: &str, env: &Env, backend_override_value: &str) -> String {
-    let environment = serde_json::Value::String(env.clone());
+fn backend_expression(module: &str, env: &str, backend_override_value: &str) -> String {
+    let environment = serde_json::to_string(env).expect("environment should always serialize");
     format!(
         "((infra & {}).#backends)[{environment}]",
         metadata_expression_for_module(module, backend_override_value)
     )
 }
 
-fn export_expression(workspace: &Workspace, env: &Env, backend_override_value: &str) -> String {
-    let environment = serde_json::Value::String(env.clone());
+fn export_expression(workspace: &Workspace, env: &str, backend_override_value: &str) -> String {
+    let environment = serde_json::to_string(env).expect("environment should always serialize");
     format!(
         "((infra & {}).out)[{environment}].terraform",
         metadata_expression(workspace, backend_override_value)
@@ -75,11 +77,11 @@ fn export_expression(workspace: &Workspace, env: &Env, backend_override_value: &
 
 fn reconciled_export_expression(
     workspace: &Workspace,
-    env: &Env,
+    env: &str,
     backend_override_value: &str,
     reconciliation: Option<&Reconciliation<'_>>,
 ) -> String {
-    let environment = serde_json::Value::String(env.clone());
+    let environment = serde_json::to_string(env).expect("environment should always serialize");
     format!(
         "((infra & {}).out)[{environment}].terraform",
         reconciled_metadata_expression(workspace, backend_override_value, reconciliation)
@@ -89,7 +91,7 @@ fn reconciled_export_expression(
 fn cue_command(
     cue_bin: &Path,
     workspace: &Workspace,
-    env: &Env,
+    env: &str,
     backend_override_value: &str,
     command: &CueCommand,
 ) -> Command {
@@ -137,7 +139,7 @@ fn cue_export_file_command(
 pub fn run_cue(
     logger: &Logger,
     workspace: &Workspace,
-    env: &Env,
+    env: &str,
     cue_bin: &Path,
     backend_override_value: &str,
     command: &CueCommand,
@@ -158,7 +160,7 @@ pub fn run_cue(
 /// Checks whether a module environment can be exported without writing output.
 pub fn check_cue_export(
     workspace: &Workspace,
-    env: &Env,
+    env: &str,
     cue_bin: &Path,
     backend_override_value: &str,
 ) -> Result<Output> {
@@ -181,7 +183,7 @@ pub fn check_cue_export(
 pub fn run_tf(
     logger: &Logger,
     workspace: &Workspace,
-    env: &Env,
+    env: &str,
     cue_bin: &Path,
     tf_bin: &Path,
     backend_override_value: &str,
@@ -207,7 +209,7 @@ pub fn run_tf(
 pub fn run_tf_with_metadata(
     logger: &Logger,
     workspace: &Workspace,
-    env: &Env,
+    env: &str,
     cue_bin: &Path,
     tf_bin: &Path,
     metadata: &TerraformMetadata<'_>,
@@ -251,10 +253,10 @@ pub fn run_tf_with_metadata(
 fn export_reconciled_terraform(
     logger: &Logger,
     workspace: &Workspace,
-    env: &Env,
+    env: &str,
     cue_bin: &Path,
     backend_override_value: &str,
-    reconciliation: Option<&Reconciliation>,
+    reconciliation: Option<&Reconciliation<'_>>,
 ) -> Result<(ExitStatus, PathBuf)> {
     let output_dir = workspace.target_dir().join(OUTPUT_FOLDER_NAME).join(env);
     let status = export_terraform_expression_to(
@@ -270,7 +272,7 @@ fn export_reconciled_terraform(
 pub fn export_terraform(
     logger: &Logger,
     workspace: &Workspace,
-    env: &Env,
+    env: &str,
     cue_bin: &Path,
     backend_override_value: &str,
 ) -> Result<(ExitStatus, PathBuf)> {
@@ -289,7 +291,7 @@ pub fn export_terraform(
 pub fn export_terraform_to(
     logger: &Logger,
     workspace: &Workspace,
-    env: &Env,
+    env: &str,
     cue_bin: &Path,
     backend_override_value: &str,
     output_dir: &Path,
@@ -306,9 +308,9 @@ pub fn export_terraform_to(
 pub fn export_terraform_with_backend_to(
     logger: &Logger,
     workspace: &Workspace,
-    env: &Env,
+    env: &str,
     backend_module: &str,
-    backend_environment: &Env,
+    backend_environment: &str,
     cue_bin: &Path,
     output_dir: &Path,
 ) -> Result<ExitStatus> {
@@ -318,19 +320,18 @@ pub fn export_terraform_with_backend_to(
     }
 
     let output_file = output_dir.join(OUTPUT_FILE_NAME);
-    let mut config: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(&output_file)
-            .into_diagnostic()
-            .map_err(|error| miette::miette!("Failed to read Terraform configuration: {error}"))?,
-    )
-    .into_diagnostic()
-    .map_err(|error| miette::miette!("Failed to decode Terraform configuration: {error}"))?;
+    let input = std::fs::File::open(&output_file)
+        .into_diagnostic()
+        .map_err(|error| miette::miette!("Failed to read Terraform configuration: {error}"))?;
+    let mut config: serde_json::Value = serde_json::from_reader(input)
+        .into_diagnostic()
+        .map_err(|error| miette::miette!("Failed to decode Terraform configuration: {error}"))?;
     let historical = read_backend_config(workspace, backend_module, backend_environment, cue_bin)?;
-    replace_root_backend(&mut config, &historical)?;
-    let contents = serde_json::to_vec_pretty(&config).into_diagnostic()?;
-    std::fs::write(&output_file, contents)
+    replace_root_backend(&mut config, historical)?;
+    let output = std::fs::File::create(&output_file)
         .into_diagnostic()
         .map_err(|error| miette::miette!("Failed to write Terraform configuration: {error}"))?;
+    serde_json::to_writer_pretty(output, &config).into_diagnostic()?;
     Ok(status)
 }
 
@@ -353,12 +354,12 @@ fn export_terraform_expression_to(
     )
 }
 
-pub fn read_migration_metadata(
+pub fn read_migration_metadata<T: DeserializeOwned>(
     workspace: &Workspace,
-    env: &Env,
+    env: &str,
     cue_bin: &Path,
     backend_override_value: &str,
-) -> Result<serde_json::Value> {
+) -> Result<T> {
     read_cue_json(
         workspace,
         cue_bin,
@@ -370,7 +371,7 @@ pub fn read_migration_metadata(
 pub fn read_backend_config(
     workspace: &Workspace,
     module: &str,
-    env: &Env,
+    env: &str,
     cue_bin: &Path,
 ) -> Result<serde_json::Value> {
     read_cue_json(
@@ -383,7 +384,7 @@ pub fn read_backend_config(
 
 pub fn read_terraform_config(
     workspace: &Workspace,
-    env: &Env,
+    env: &str,
     cue_bin: &Path,
 ) -> Result<serde_json::Value> {
     read_cue_json(
@@ -394,12 +395,12 @@ pub fn read_terraform_config(
     )
 }
 
-fn read_cue_json(
+fn read_cue_json<T: DeserializeOwned>(
     workspace: &Workspace,
     cue_bin: &Path,
     expression: &str,
     description: &str,
-) -> Result<serde_json::Value> {
+) -> Result<T> {
     let mut command = Command::new(cue_bin);
     command
         .current_dir(workspace.target_dir())
@@ -426,13 +427,14 @@ fn read_cue_json(
 
 pub fn replace_root_backend(
     current: &mut serde_json::Value,
-    historical: &serde_json::Value,
+    mut historical: serde_json::Value,
 ) -> Result<()> {
-    let historical_backend = root_backend(historical, "Historical backend configuration")?.clone();
-    validate_backend(&historical_backend, "Historical backend configuration")?;
+    let historical_backend = root_backend(&historical, "Historical backend configuration")?;
+    validate_backend(historical_backend, "Historical backend configuration")?;
     let current_backend = root_backend_mut(current, "Terraform configuration")?;
     validate_backend(current_backend, "Terraform configuration")?;
-    *current_backend = historical_backend;
+    *current_backend =
+        root_backend_mut(&mut historical, "Historical backend configuration")?.take();
     Ok(())
 }
 
@@ -477,7 +479,7 @@ pub fn export_historical_backend(
     logger: &Logger,
     workspace: &Workspace,
     module: &str,
-    env: &Env,
+    env: &str,
     cue_bin: &Path,
     backend_override_value: &str,
     output_dir: &Path,
@@ -506,12 +508,12 @@ pub fn run_tfmigrate(
     operation: &str,
     args: &[String],
     output_dir: &Path,
-    migration: &serde_json::Value,
+    migration: &impl serde::Serialize,
     timeout: Option<Duration>,
 ) -> Result<ExitStatus> {
-    let contents = serde_json::to_vec_pretty(&migration).into_diagnostic()?;
     let migration_file = output_dir.join(TFMIGRATE_FILE_NAME);
-    std::fs::write(&migration_file, contents).into_diagnostic()?;
+    let migration_file = std::fs::File::create(&migration_file).into_diagnostic()?;
+    serde_json::to_writer_pretty(migration_file, migration).into_diagnostic()?;
     let tf_command = shell_words::join([tf_bin
         .to_str()
         .ok_or_else(|| miette::miette!("Terraform binary path must be valid UTF-8"))?]);
@@ -610,12 +612,8 @@ mod tests {
             required_providers: vec!["google".to_owned(), "neon".to_owned()],
         };
 
-        let expression = reconciled_export_expression(
-            &workspace,
-            &"global".to_owned(),
-            "null",
-            Some(&reconciliation),
-        );
+        let expression =
+            reconciled_export_expression(&workspace, "global", "null", Some(&reconciliation));
 
         assert_eq!(
             expression,
@@ -667,7 +665,7 @@ mod tests {
             "output": {"value": {"value": "current"}}
         });
 
-        replace_root_backend(&mut current, &historical)?;
+        replace_root_backend(&mut current, historical)?;
 
         assert_eq!(current, expected);
         Ok(())
@@ -680,7 +678,7 @@ mod tests {
             "terraform": {"backend": {"gcs": {}, "s3": {}}}
         });
 
-        let error = replace_root_backend(&mut current, &historical)
+        let error = replace_root_backend(&mut current, historical)
             .expect_err("multiple backend types should be rejected");
 
         assert!(error.to_string().contains("exactly one backend type"));

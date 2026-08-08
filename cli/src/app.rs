@@ -296,9 +296,9 @@ enum DestinationAction {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct MigrationEndpoint {
-    module: String,
-    environment: Env,
+struct MigrationEndpoint<'a> {
+    module: &'a str,
+    environment: &'a str,
     backend: serde_json::Value,
     backend_location_complete: bool,
     lock_file: String,
@@ -306,10 +306,33 @@ struct MigrationEndpoint {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ModuleMigrationInspection {
+struct ModuleMigrationInspection<'a> {
     kind: &'static str,
-    source: MigrationEndpoint,
-    destination: MigrationEndpoint,
+    source: MigrationEndpoint<'a>,
+    destination: MigrationEndpoint<'a>,
+}
+
+#[derive(Serialize)]
+struct MigrationDocument<'a> {
+    migration: MigrationBody<'a>,
+}
+
+#[derive(Serialize)]
+struct MigrationBody<'a> {
+    multi_state: MultiStateMigration<'a>,
+}
+
+#[derive(Serialize)]
+struct MultiStateMigration<'a> {
+    cuet: CuetMigration<'a>,
+}
+
+#[derive(Serialize)]
+struct CuetMigration<'a> {
+    from_dir: &'a std::path::Path,
+    from_skip_plan: bool,
+    to_dir: &'static str,
+    actions: &'a [String],
 }
 
 struct MigrationDirectory(PathBuf);
@@ -359,13 +382,12 @@ impl MigrationRunner<'_> {
     }
 
     fn run(&self, command: &MigrationCommand) -> Result<Option<ExitStatus>> {
-        let metadata: MigrationMetadata = serde_json::from_value(read_migration_metadata(
+        let metadata: MigrationMetadata = read_migration_metadata(
             self.workspace,
             self.env,
             self.cue_bin,
             self.backend_override_value,
-        )?)
-        .into_diagnostic()?;
+        )?;
         let transitions = self.current_transitions(&metadata);
         if !metadata.module_history.is_empty() && !transitions.is_empty() {
             return Err(miette::miette!(
@@ -407,7 +429,7 @@ impl MigrationRunner<'_> {
             return Ok(Some(status));
         };
 
-        let migration = migration_json(&prepared);
+        let migration = migration_document(&prepared);
         let tfmigrate_bin = resolve_tool(
             self.tfmigrate_path
                 .unwrap_or_else(|| std::path::Path::new(DEFAULT_TFMIGRATE_BIN)),
@@ -472,13 +494,14 @@ impl MigrationRunner<'_> {
         let mut current = read_terraform_config(self.workspace, self.env, self.cue_bin)?;
         let historical =
             read_backend_config(self.workspace, source_module, source_env, self.cue_bin)?;
-        if has_required_providers(&current) && !destination_lock.is_file() {
+        let has_required_providers = has_required_providers(&current);
+        if has_required_providers && !destination_lock.is_file() {
             return Err(miette::miette!(
                 "Destination provider lock is missing at '{}'",
                 destination_lock.display()
             ));
         }
-        if has_required_providers(&current)
+        if has_required_providers
             && std::fs::metadata(&destination_lock)
                 .into_diagnostic()?
                 .len()
@@ -489,15 +512,15 @@ impl MigrationRunner<'_> {
                 destination_lock.display()
             ));
         }
-        replace_root_backend(&mut current, &historical)?;
+        replace_root_backend(&mut current, historical)?;
         Ok(())
     }
 
-    fn inspect_module(
-        &self,
-        source_module: &str,
-        source_env: &Env,
-    ) -> Result<ModuleMigrationInspection> {
+    fn inspect_module<'m>(
+        &'m self,
+        source_module: &'m str,
+        source_env: &'m Env,
+    ) -> Result<ModuleMigrationInspection<'m>> {
         let source_backend =
             read_backend_config(self.workspace, source_module, source_env, self.cue_bin)?;
         let destination_backend = read_backend_config(
@@ -506,22 +529,21 @@ impl MigrationRunner<'_> {
             self.env,
             self.cue_bin,
         )?;
-        let (source_backend, source_backend_location_complete) =
-            inspected_backend(&source_backend)?;
+        let (source_backend, source_backend_location_complete) = inspected_backend(source_backend)?;
         let (destination_backend, destination_backend_location_complete) =
-            inspected_backend(&destination_backend)?;
+            inspected_backend(destination_backend)?;
         Ok(ModuleMigrationInspection {
             kind: "module",
             source: MigrationEndpoint {
-                module: source_module.to_owned(),
-                environment: source_env.clone(),
+                module: source_module,
+                environment: source_env,
                 backend: source_backend,
                 backend_location_complete: source_backend_location_complete,
                 lock_file: module_lock_path(source_module, source_env),
             },
             destination: MigrationEndpoint {
-                module: self.workspace.module_name().to_owned(),
-                environment: self.env.clone(),
+                module: self.workspace.module_name(),
+                environment: self.env,
                 backend: destination_backend,
                 backend_location_complete: destination_backend_location_complete,
                 lock_file: module_lock_path(self.workspace.module_name(), self.env),
@@ -679,13 +701,12 @@ impl MigrationRunner<'_> {
                 "Source state is missing; cannot validate the migration"
             ));
         }
-        let local_backend = serde_json::Value::String("local.tfstate".to_owned()).to_string();
         let status = export_terraform_to(
             self.logger,
             self.workspace,
             self.env,
             self.cue_bin,
-            &local_backend,
+            LOCAL_BACKEND_OVERRIDE_VALUE,
             migration_dir,
         )?;
         if !status.success() {
@@ -966,14 +987,14 @@ fn module_lock_path(module: &str, env: &Env) -> String {
         .into_owned()
 }
 
-fn root_backend(config: &serde_json::Value) -> Result<&serde_json::Value> {
+fn root_backend_mut(config: &mut serde_json::Value) -> Result<&mut serde_json::Value> {
     config
-        .get("terraform")
-        .and_then(|terraform| terraform.get("backend"))
+        .get_mut("terraform")
+        .and_then(|terraform| terraform.get_mut("backend"))
         .ok_or_else(|| miette::miette!("Terraform configuration has no root backend"))
 }
 
-fn inspected_backend(config: &serde_json::Value) -> Result<(serde_json::Value, bool)> {
+fn inspected_backend(mut config: serde_json::Value) -> Result<(serde_json::Value, bool)> {
     const LOCATION_FIELDS: [&str; 14] = [
         "bucket",
         "container_name",
@@ -990,38 +1011,35 @@ fn inspected_backend(config: &serde_json::Value) -> Result<(serde_json::Value, b
         "storage_account_name",
         "workspace_key_prefix",
     ];
-    let backend = root_backend(config)?
-        .as_object()
+    let backend = root_backend_mut(&mut config)?
+        .as_object_mut()
         .ok_or_else(|| miette::miette!("Terraform root backend must be an object"))?;
     if backend.len() != 1 {
         return Err(miette::miette!(
             "Terraform root backend must contain exactly one backend type"
         ));
     }
-    let (backend_type, backend_config) = backend
-        .iter()
+    let (backend_type, backend_config) = std::mem::take(backend)
+        .into_iter()
         .next()
         .ok_or_else(|| miette::miette!("Terraform root backend is empty"))?;
-    let backend_config = backend_config
-        .as_object()
-        .ok_or_else(|| miette::miette!("Terraform backend configuration must be an object"))?;
-    let mut safe_config: serde_json::Map<_, _> = backend_config
-        .iter()
-        .filter(|(key, _)| LOCATION_FIELDS.contains(&key.as_str()))
-        .map(|(key, value)| (key.clone(), value.clone()))
+    let serde_json::Value::Object(backend_config) = backend_config else {
+        return Err(miette::miette!(
+            "Terraform backend configuration must be an object"
+        ));
+    };
+    let safe_config = backend_config
+        .into_iter()
+        .filter(|(key, _)| {
+            LOCATION_FIELDS.contains(&key.as_str())
+                || backend_type == "consul" && key == "address"
+                || backend_type == "remote" && key == "workspaces"
+        })
         .collect();
-    if backend_type == "consul"
-        && let Some(address) = backend_config.get("address")
-    {
-        safe_config.insert("address".to_owned(), address.clone());
-    }
-    if backend_type == "remote"
-        && let Some(workspaces) = backend_config.get("workspaces")
-    {
-        safe_config.insert("workspaces".to_owned(), workspaces.clone());
-    }
     let complete = matches!(backend_type.as_str(), "gcs" | "local");
-    Ok((serde_json::json!({backend_type: safe_config}), complete))
+    let mut backend = serde_json::Map::new();
+    backend.insert(backend_type, serde_json::Value::Object(safe_config));
+    Ok((serde_json::Value::Object(backend), complete))
 }
 
 fn has_required_providers(config: &serde_json::Value) -> bool {
@@ -1102,19 +1120,19 @@ fn resource_actions(transitions: &[&ResourceTransition]) -> Vec<String> {
     actions
 }
 
-fn migration_json(prepared: &PreparedMigration) -> serde_json::Value {
-    serde_json::json!({
-        "migration": {
-            "multi_state": {
-                "cuet": {
-                    "from_dir": prepared.source_dir,
-                    "from_skip_plan": prepared.from_skip_plan,
-                    "to_dir": ".",
-                    "actions": prepared.actions,
-                }
-            }
-        }
-    })
+fn migration_document(prepared: &PreparedMigration) -> MigrationDocument<'_> {
+    MigrationDocument {
+        migration: MigrationBody {
+            multi_state: MultiStateMigration {
+                cuet: CuetMigration {
+                    from_dir: &prepared.source_dir,
+                    from_skip_plan: prepared.from_skip_plan,
+                    to_dir: ".",
+                    actions: &prepared.actions,
+                },
+            },
+        },
+    }
 }
 
 fn parse_history_target(target: &str, default_env: &Env) -> Result<(String, Env)> {
@@ -1733,7 +1751,7 @@ if [[ $* == 'output -json' ]]; then printf '{{}}'; fi
             }}},
         });
 
-        let (backend, complete) = inspected_backend(&config).unwrap();
+        let (backend, complete) = inspected_backend(config).unwrap();
 
         assert!(complete);
         assert_eq!(backend["gcs"]["bucket"], "state");
