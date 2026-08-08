@@ -2,18 +2,16 @@ use crate::cli::{Cli, Commands, CueCommand, Env, MigrationCommand, ModulesComman
 use crate::completions;
 use crate::environment;
 use crate::execution::{
-    TerraformMetadata, capture_tf_in, check_cue_export, export_terraform, export_terraform_to,
-    export_terraform_with_backend_to, output_tf_in, read_backend_config, read_migration_metadata,
-    read_terraform_config, replace_root_backend, resolve_tool, run_cue, run_tf_in,
-    run_tf_with_metadata,
+    TerraformMetadata, check_cue_export, export_terraform, export_terraform_to, output_tf_in,
+    read_backend_config, read_migration_metadata, read_terraform_config, replace_root_backend,
+    resolve_tool, run_cue, run_tf_in, run_tf_with_metadata,
 };
 use crate::logger::Logger;
 use crate::migration::{
     DestinationAction, MigrationEndpoint, MigrationMetadata, ModuleMigrationInspection,
-    ResourceMigrationRunner, ResourceTransition, StateSnapshot, StateSnapshotMetadata,
-    destination_action, ensure_default_workspace, ensure_migrated_snapshot,
-    ensure_module_migration_files, has_required_providers, inspected_backend, parse_history_target,
-    state_snapshot_missing,
+    ModuleMigrationPlanner, ResourceMigrationRunner, ResourceTransition, StateSnapshot,
+    destination_action, ensure_migrated_snapshot, ensure_module_migration_files,
+    has_required_providers, inspected_backend, parse_history_target, state_snapshot_metadata,
 };
 use crate::reconciliation;
 use crate::workspace::{Workspace, discover_modules, resolve_root};
@@ -294,6 +292,17 @@ impl MigrationRunner<'_> {
             .ok_or_else(|| miette::miette!("Migration command requires OpenTofu"))
     }
 
+    fn module_planner(&self) -> Result<ModuleMigrationPlanner<'_>> {
+        Ok(ModuleMigrationPlanner::new(
+            self.logger,
+            self.workspace,
+            self.env,
+            self.cue_bin,
+            self.tf_bin()?,
+            self.timeout,
+        ))
+    }
+
     fn run(
         &self,
         command: &MigrationCommand,
@@ -469,7 +478,9 @@ impl MigrationRunner<'_> {
             destination_dir.with_file_name(format!("{}.migrate", self.env)),
         );
 
-        let status = self.plan_module(source_module, source_env, migration_dir.path())?;
+        let status =
+            self.module_planner()?
+                .plan(source_module, source_env, migration_dir.path())?;
         if !status.success() || matches!(command, MigrationCommand::Plan { .. }) {
             return Ok(Some(status));
         }
@@ -484,11 +495,12 @@ impl MigrationRunner<'_> {
         source_env: &str,
         migration_dir: &std::path::Path,
     ) -> Result<ExitStatus> {
-        let status = self.prepare_module_source(source_module, source_env, migration_dir)?;
+        let planner = self.module_planner()?;
+        let status = planner.prepare_source(source_module, source_env, migration_dir)?;
         if !status.success() {
             return Ok(status);
         }
-        let StateSnapshot::Present(source_metadata) = self.read_state_snapshot(migration_dir)?
+        let StateSnapshot::Present(source_metadata) = planner.read_state_snapshot(migration_dir)?
         else {
             return Err(miette::miette!(
                 "Source state is missing; cannot verify that the migration was previously applied"
@@ -505,7 +517,7 @@ impl MigrationRunner<'_> {
         if matches!(
             destination_action(
                 &source_metadata,
-                &self.read_state_snapshot(destination_dir.path())?
+                &planner.read_state_snapshot(destination_dir.path())?
             )?,
             DestinationAction::Current
         ) {
@@ -564,61 +576,6 @@ impl MigrationRunner<'_> {
         )
     }
 
-    fn plan_module(
-        &self,
-        source_module: &str,
-        source_env: &str,
-        migration_dir: &std::path::Path,
-    ) -> Result<ExitStatus> {
-        let status = self.prepare_module_source(source_module, source_env, migration_dir)?;
-        if !status.success() {
-            return Ok(status);
-        }
-        if matches!(
-            self.read_state_snapshot(migration_dir)?,
-            StateSnapshot::Missing
-        ) {
-            return Err(miette::miette!(
-                "Source state is missing; cannot validate the migration"
-            ));
-        }
-        let status = export_terraform_to(
-            self.logger,
-            self.workspace,
-            self.env,
-            self.cue_bin,
-            LOCAL_BACKEND_OVERRIDE_VALUE,
-            migration_dir,
-        )?;
-        if !status.success() {
-            return Ok(status);
-        }
-        let status = run_tf_in(
-            self.logger,
-            self.tf_bin()?,
-            migration_dir,
-            &[
-                "init",
-                "-migrate-state",
-                "-force-copy",
-                "-input=false",
-                "-lockfile=readonly",
-                "-lock-timeout=5m",
-            ],
-            self.timeout,
-        )?;
-        if !status.success() {
-            return Ok(status);
-        }
-        run_tf_in(
-            self.logger,
-            self.tf_bin()?,
-            migration_dir,
-            &["plan", "-detailed-exitcode", "-lock-timeout=5m"],
-            self.timeout,
-        )
-    }
-
     fn prepare_module_destination(&self, destination_dir: &std::path::Path) -> Result<ExitStatus> {
         if destination_dir.exists() {
             std::fs::remove_dir_all(destination_dir).into_diagnostic()?;
@@ -642,73 +599,6 @@ impl MigrationRunner<'_> {
             &["init", "-input=false", "-lockfile=readonly"],
             self.timeout,
         )
-    }
-
-    fn read_state_snapshot(&self, directory: &std::path::Path) -> Result<StateSnapshot> {
-        let output = capture_tf_in(
-            self.logger,
-            self.tf_bin()?,
-            directory,
-            &["state", "pull"],
-            self.timeout,
-        )?;
-        if output.status.success() {
-            return state_snapshot_metadata(&output.stdout).map(StateSnapshot::Present);
-        }
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if state_snapshot_missing(&stderr) {
-            return Ok(StateSnapshot::Missing);
-        }
-        Err(miette::miette!(
-            "Failed to read state snapshot: {}",
-            stderr.trim()
-        ))
-    }
-
-    fn prepare_module_source(
-        &self,
-        source_module: &str,
-        source_env: &str,
-        migration_dir: &std::path::Path,
-    ) -> Result<ExitStatus> {
-        if migration_dir.exists() {
-            std::fs::remove_dir_all(migration_dir).into_diagnostic()?;
-        }
-        let status = export_terraform_with_backend_to(
-            self.logger,
-            self.workspace,
-            self.env,
-            source_module,
-            source_env,
-            self.cue_bin,
-            migration_dir,
-        )?;
-        if !status.success() {
-            return Ok(status);
-        }
-        self.copy_provider_lock(migration_dir)?;
-        let status = run_tf_in(
-            self.logger,
-            self.tf_bin()?,
-            migration_dir,
-            &["init", "-input=false", "-lockfile=readonly"],
-            self.timeout,
-        )?;
-        if !status.success() {
-            return Ok(status);
-        }
-        let workspaces = output_tf_in(
-            self.logger,
-            self.tf_bin()?,
-            migration_dir,
-            &["workspace", "list", "-no-color"],
-            self.timeout,
-        )?;
-        if !workspaces.status.success() {
-            return Ok(workspaces.status);
-        }
-        ensure_default_workspace(&workspaces.stdout)?;
-        Ok(status)
     }
 
     fn copy_provider_lock(&self, destination_dir: &std::path::Path) -> Result<()> {
@@ -753,12 +643,6 @@ fn module_lock_path(module: &str, env: &str) -> String {
         .join(".terraform.lock.hcl")
         .to_string_lossy()
         .into_owned()
-}
-
-fn state_snapshot_metadata(output: &[u8]) -> Result<StateSnapshotMetadata> {
-    serde_json::from_slice(output)
-        .into_diagnostic()
-        .map_err(|error| miette::miette!("Failed to read state snapshot metadata: {error}"))
 }
 
 fn run_modules(

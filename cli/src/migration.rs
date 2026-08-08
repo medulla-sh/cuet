@@ -1,6 +1,9 @@
 use crate::cli::{Env, MigrationCommand, validate_env};
 use crate::environment;
-use crate::execution::{export_historical_backend, export_terraform, resolve_tool, run_tfmigrate};
+use crate::execution::{
+    capture_tf_in, export_historical_backend, export_terraform, export_terraform_to,
+    export_terraform_with_backend_to, output_tf_in, resolve_tool, run_tf_in, run_tfmigrate,
+};
 use crate::logger::Logger;
 use crate::workspace::Workspace;
 use miette::{IntoDiagnostic, Result};
@@ -12,6 +15,7 @@ use std::process::ExitStatus;
 use std::time::Duration;
 
 const DEFAULT_TFMIGRATE_BIN: &str = "tfmigrate";
+const LOCAL_BACKEND_OVERRIDE_VALUE: &str = r#""local.tfstate""#;
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,6 +55,177 @@ pub enum StateSnapshot {
 pub enum DestinationAction {
     Copy,
     Current,
+}
+
+pub struct ModuleMigrationPlanner<'a> {
+    logger: &'a Logger,
+    workspace: &'a Workspace,
+    env: &'a str,
+    cue_bin: &'a std::path::Path,
+    tf_bin: &'a std::path::Path,
+    timeout: Option<Duration>,
+}
+
+impl<'a> ModuleMigrationPlanner<'a> {
+    pub fn new(
+        logger: &'a Logger,
+        workspace: &'a Workspace,
+        env: &'a str,
+        cue_bin: &'a std::path::Path,
+        tf_bin: &'a std::path::Path,
+        timeout: Option<Duration>,
+    ) -> Self {
+        Self {
+            logger,
+            workspace,
+            env,
+            cue_bin,
+            tf_bin,
+            timeout,
+        }
+    }
+
+    pub fn plan(
+        &self,
+        source_module: &str,
+        source_env: &str,
+        migration_dir: &std::path::Path,
+    ) -> Result<ExitStatus> {
+        let status = self.prepare_source(source_module, source_env, migration_dir)?;
+        if !status.success() {
+            return Ok(status);
+        }
+        if matches!(
+            self.read_state_snapshot(migration_dir)?,
+            StateSnapshot::Missing
+        ) {
+            return Err(miette::miette!(
+                "Source state is missing; cannot validate the migration"
+            ));
+        }
+        let status = export_terraform_to(
+            self.logger,
+            self.workspace,
+            self.env,
+            self.cue_bin,
+            LOCAL_BACKEND_OVERRIDE_VALUE,
+            migration_dir,
+        )?;
+        if !status.success() {
+            return Ok(status);
+        }
+        let status = run_tf_in(
+            self.logger,
+            self.tf_bin,
+            migration_dir,
+            &[
+                "init",
+                "-migrate-state",
+                "-force-copy",
+                "-input=false",
+                "-lockfile=readonly",
+                "-lock-timeout=5m",
+            ],
+            self.timeout,
+        )?;
+        if !status.success() {
+            return Ok(status);
+        }
+        run_tf_in(
+            self.logger,
+            self.tf_bin,
+            migration_dir,
+            &["plan", "-detailed-exitcode", "-lock-timeout=5m"],
+            self.timeout,
+        )
+    }
+
+    pub fn prepare_source(
+        &self,
+        source_module: &str,
+        source_env: &str,
+        migration_dir: &std::path::Path,
+    ) -> Result<ExitStatus> {
+        if migration_dir.exists() {
+            std::fs::remove_dir_all(migration_dir).into_diagnostic()?;
+        }
+        let status = export_terraform_with_backend_to(
+            self.logger,
+            self.workspace,
+            self.env,
+            source_module,
+            source_env,
+            self.cue_bin,
+            migration_dir,
+        )?;
+        if !status.success() {
+            return Ok(status);
+        }
+        self.copy_provider_lock(migration_dir)?;
+        let status = run_tf_in(
+            self.logger,
+            self.tf_bin,
+            migration_dir,
+            &["init", "-input=false", "-lockfile=readonly"],
+            self.timeout,
+        )?;
+        if !status.success() {
+            return Ok(status);
+        }
+        let workspaces = output_tf_in(
+            self.logger,
+            self.tf_bin,
+            migration_dir,
+            &["workspace", "list", "-no-color"],
+            self.timeout,
+        )?;
+        if !workspaces.status.success() {
+            return Ok(workspaces.status);
+        }
+        ensure_default_workspace(&workspaces.stdout)?;
+        Ok(status)
+    }
+
+    pub fn read_state_snapshot(&self, directory: &std::path::Path) -> Result<StateSnapshot> {
+        let output = capture_tf_in(
+            self.logger,
+            self.tf_bin,
+            directory,
+            &["state", "pull"],
+            self.timeout,
+        )?;
+        if output.status.success() {
+            return state_snapshot_metadata(&output.stdout).map(StateSnapshot::Present);
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if state_snapshot_missing(&stderr) {
+            return Ok(StateSnapshot::Missing);
+        }
+        Err(miette::miette!(
+            "Failed to read state snapshot: {}",
+            stderr.trim()
+        ))
+    }
+
+    fn copy_provider_lock(&self, destination_dir: &std::path::Path) -> Result<()> {
+        let source = self
+            .workspace
+            .target_dir()
+            .join(".cuet")
+            .join(self.env)
+            .join(".terraform.lock.hcl");
+        if source.is_file() {
+            std::fs::copy(&source, destination_dir.join(".terraform.lock.hcl"))
+                .into_diagnostic()
+                .map_err(|error| {
+                    miette::miette!(
+                        "Failed to copy provider lock from '{}': {error}",
+                        source.display()
+                    )
+                })?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Serialize)]
@@ -391,6 +566,12 @@ pub fn has_required_providers(config: &serde_json::Value) -> bool {
 
 pub fn state_snapshot_missing(stderr: &str) -> bool {
     stderr.contains("No state file was found")
+}
+
+pub fn state_snapshot_metadata(output: &[u8]) -> Result<StateSnapshotMetadata> {
+    serde_json::from_slice(output)
+        .into_diagnostic()
+        .map_err(|error| miette::miette!("Failed to read state snapshot metadata: {error}"))
 }
 
 pub fn ensure_migrated_snapshot(
