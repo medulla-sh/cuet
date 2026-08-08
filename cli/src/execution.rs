@@ -19,7 +19,7 @@ const TFMIGRATE_OVERRIDE_FILE: &str = "_tfmigrate_override.tf";
 
 pub struct TerraformMetadata<'a> {
     pub backend_override_value: &'a str,
-    pub reconciliation: Option<&'a Reconciliation>,
+    pub reconciliation: Option<&'a Reconciliation<'a>>,
 }
 
 fn metadata_expression(workspace: &Workspace, backend_override_value: &str) -> String {
@@ -36,7 +36,7 @@ fn metadata_expression_for_module(module: &str, backend_override_value: &str) ->
 fn reconciled_metadata_expression(
     workspace: &Workspace,
     backend_override_value: &str,
-    reconciliation: Option<&Reconciliation>,
+    reconciliation: Option<&Reconciliation<'_>>,
 ) -> String {
     let Some(reconciliation) = reconciliation else {
         return metadata_expression(workspace, backend_override_value);
@@ -77,7 +77,7 @@ fn reconciled_export_expression(
     workspace: &Workspace,
     env: &Env,
     backend_override_value: &str,
-    reconciliation: Option<&Reconciliation>,
+    reconciliation: Option<&Reconciliation<'_>>,
 ) -> String {
     let environment = serde_json::Value::String(env.clone());
     format!(
@@ -606,7 +606,7 @@ mod tests {
         let temp = TestDirectory::new()?;
         let workspace = temp.workspace()?;
         let reconciliation = Reconciliation {
-            environment: "global".to_owned(),
+            environment: "global",
             required_providers: vec!["google".to_owned(), "neon".to_owned()],
         };
 

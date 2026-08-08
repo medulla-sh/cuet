@@ -17,7 +17,8 @@ mod workspace;
 fn main() -> Result<()> {
     completions::complete();
 
-    if let Some(status) = app::run(cli::Cli::parse())?
+    let cli = cli::Cli::parse();
+    if let Some(status) = app::run(&cli)?
         && !status.success()
     {
         std::process::exit(status.code().unwrap_or(1));

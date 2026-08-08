@@ -10,8 +10,8 @@ use std::time::Duration;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Reconciliation {
-    pub(crate) environment: Env,
+pub struct Reconciliation<'a> {
+    pub(crate) environment: &'a str,
     pub(crate) required_providers: Vec<String>,
 }
 
@@ -49,13 +49,13 @@ pub fn environment_names(workspace: &Workspace) -> Result<BTreeSet<Env>> {
     Ok(environments)
 }
 
-pub fn inspect(
+pub fn inspect<'a>(
     logger: &Logger,
     workspace: &Workspace,
     tf_bin: &Path,
-    environment: &Env,
+    environment: &'a str,
     timeout: Option<Duration>,
-) -> Result<Option<Reconciliation>> {
+) -> Result<Option<Reconciliation<'a>>> {
     let directory = workspace.target_dir().join(".cuet").join(environment);
     if !directory.join(INIT_STATE_FILE).is_file() {
         return Ok(None);
@@ -71,7 +71,7 @@ pub fn inspect(
         return Ok(None);
     }
     Ok(Some(Reconciliation {
-        environment: environment.clone(),
+        environment,
         required_providers: state.providers.into_iter().collect(),
     }))
 }
@@ -80,7 +80,7 @@ pub fn remove_if_empty(
     logger: &Logger,
     workspace: &Workspace,
     tf_bin: &Path,
-    environment: &Env,
+    environment: &str,
     timeout: Option<Duration>,
 ) -> Result<()> {
     if inspect(logger, workspace, tf_bin, environment, timeout)?.is_some() {
@@ -89,7 +89,7 @@ pub fn remove_if_empty(
     remove_local(workspace, environment)
 }
 
-pub fn remove_local(workspace: &Workspace, environment: &Env) -> Result<()> {
+pub fn remove_local(workspace: &Workspace, environment: &str) -> Result<()> {
     let directory = workspace.target_dir().join(".cuet").join(environment);
     if !directory.exists() {
         return Ok(());
@@ -120,7 +120,7 @@ fn inspect_state(
     logger: &Logger,
     tf_bin: &Path,
     directory: &Path,
-    environment: &Env,
+    environment: &str,
     timeout: Option<Duration>,
 ) -> Result<EnvironmentState> {
     let resources = capture_in(logger, tf_bin, directory, &["state", "list"], timeout)?;
@@ -353,29 +353,12 @@ fi
             initialize_environment(&workspace, environment)?;
         }
 
-        let reconciliation = inspect(
-            &Logger::new(false),
-            &workspace,
-            &tf_bin,
-            &"legacy".to_owned(),
-            None,
-        )?
-        .expect("legacy should have state");
-        let output_reconciliation = inspect(
-            &Logger::new(false),
-            &workspace,
-            &tf_bin,
-            &"outputs".to_owned(),
-            None,
-        )?
-        .expect("outputs should count as state");
-        let empty = inspect(
-            &Logger::new(false),
-            &workspace,
-            &tf_bin,
-            &"empty".to_owned(),
-            None,
-        )?;
+        let reconciliation = inspect(&Logger::new(false), &workspace, &tf_bin, "legacy", None)?
+            .expect("legacy should have state");
+        let output_reconciliation =
+            inspect(&Logger::new(false), &workspace, &tf_bin, "outputs", None)?
+                .expect("outputs should count as state");
+        let empty = inspect(&Logger::new(false), &workspace, &tf_bin, "empty", None)?;
 
         assert_eq!(reconciliation.environment, "legacy");
         assert_eq!(reconciliation.required_providers, ["google", "neon"]);
@@ -384,13 +367,7 @@ fi
         assert!(workspace.target_dir().join(".cuet/empty").is_dir());
 
         fs::write(workspace.target_dir().join(".cuet/live/removed"), "").into_diagnostic()?;
-        remove_if_empty(
-            &Logger::new(false),
-            &workspace,
-            &tf_bin,
-            &"live".to_owned(),
-            None,
-        )?;
+        remove_if_empty(&Logger::new(false), &workspace, &tf_bin, "live", None)?;
 
         assert!(!workspace.target_dir().join(".cuet/live").exists());
         Ok(())

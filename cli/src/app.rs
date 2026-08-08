@@ -1,5 +1,5 @@
 use crate::cli::{
-    Cli, Commands, Env, MigrationCommand, ModuleTarget, ModulesCommand, Target, parse_env,
+    Cli, Commands, CueCommand, Env, MigrationCommand, ModuleTarget, ModulesCommand, parse_env,
 };
 use crate::completions;
 use crate::environment;
@@ -15,7 +15,6 @@ use crate::workspace::{Workspace, discover_modules, resolve_root};
 use clap::CommandFactory;
 use miette::{IntoDiagnostic, Result};
 use serde::{Deserialize, Serialize};
-use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 use std::path::Component;
@@ -27,149 +26,127 @@ use std::time::Duration;
 const DEFAULT_CUE_BIN: &str = "cue";
 const DEFAULT_TF_BIN: &str = "tofu";
 const DEFAULT_TFMIGRATE_BIN: &str = "tfmigrate";
-const LOCAL_STATE_FILE_NAME: &str = "local.tfstate";
+const LOCAL_BACKEND_OVERRIDE_VALUE: &str = r#""local.tfstate""#;
 
-struct TargetInvocation {
-    verbose: bool,
-    target: Option<crate::cli::Target>,
-    workspace_root: Option<PathBuf>,
-    cue_path: Option<PathBuf>,
-    tf_path: Option<PathBuf>,
-    tfmigrate_path: Option<PathBuf>,
-    timeout: Option<Duration>,
-    use_local_backend: bool,
-    command: Commands,
+#[derive(Clone, Copy, Debug)]
+enum TargetCommand<'a> {
+    Cue(&'a CueCommand),
+    Tf(&'a [String]),
+    Migrate(&'a MigrationCommand),
 }
 
-pub fn run(cli: Cli) -> Result<Option<ExitStatus>> {
+pub fn run(cli: &Cli) -> Result<Option<ExitStatus>> {
     let current_dir = std::env::current_dir().into_diagnostic()?;
     run_from(cli, &current_dir, &mut io::stdout().lock())
 }
 
 fn run_from(
-    cli: Cli,
+    cli: &Cli,
     current_dir: &std::path::Path,
     output: &mut impl Write,
 ) -> Result<Option<ExitStatus>> {
-    let Cli {
-        verbose,
-        target,
-        workspace: workspace_root,
-        cue_path,
-        tf_path,
-        tfmigrate_path,
-        timeout,
-        use_local_backend,
-        command,
-    } = cli;
-
-    if matches!(&command, Commands::Version) {
-        write!(output, "{}", Cli::command().render_version()).into_diagnostic()?;
-        return Ok(None);
+    match &cli.command {
+        Commands::Version => {
+            write!(output, "{}", Cli::command().render_version()).into_diagnostic()?;
+            Ok(None)
+        }
+        Commands::Completions { shell } => {
+            completions::write_registration(*shell, output)?;
+            Ok(None)
+        }
+        Commands::Modules { command } => {
+            let root = resolve_root(current_dir, cli.workspace.as_deref())?;
+            run_modules(
+                command,
+                &root,
+                cli.cue_path.as_deref(),
+                cli.use_local_backend,
+                cli.verbose,
+                output,
+            )?;
+            Ok(None)
+        }
+        Commands::Cue { command } => {
+            run_target_command(cli, TargetCommand::Cue(command), current_dir)
+        }
+        Commands::Tf { args } => run_target_command(cli, TargetCommand::Tf(args), current_dir),
+        Commands::Migrate { command } => {
+            run_target_command(cli, TargetCommand::Migrate(command), current_dir)
+        }
     }
-
-    if let Commands::Completions { shell } = command {
-        completions::write_registration(shell, output)?;
-        return Ok(None);
-    }
-
-    if let Commands::Modules { command } = command {
-        let root = resolve_root(current_dir, workspace_root.as_deref())?;
-        run_modules(
-            &command,
-            &root,
-            cue_path,
-            use_local_backend,
-            verbose,
-            output,
-        )?;
-        return Ok(None);
-    }
-
-    run_target_command(
-        TargetInvocation {
-            verbose,
-            target,
-            workspace_root,
-            cue_path,
-            tf_path,
-            tfmigrate_path,
-            timeout,
-            use_local_backend,
-            command,
-        },
-        current_dir,
-    )
 }
 
 fn run_target_command(
-    invocation: TargetInvocation,
+    cli: &Cli,
+    command: TargetCommand<'_>,
     current_dir: &std::path::Path,
 ) -> Result<Option<ExitStatus>> {
-    let default_target = Target::default();
-    let target = invocation.target.as_ref().unwrap_or(&default_target);
     let cue_bin = resolve_tool(
-        &invocation
-            .cue_path
-            .clone()
-            .unwrap_or_else(|| PathBuf::from(DEFAULT_CUE_BIN)),
+        cli.cue_path
+            .as_deref()
+            .unwrap_or_else(|| std::path::Path::new(DEFAULT_CUE_BIN)),
     )?;
-    let workspace = Workspace::resolve(
-        current_dir,
-        invocation.workspace_root.as_deref(),
-        &target.module,
-    )?;
-    let backend_override_value = if invocation.use_local_backend {
-        Cow::Owned(format!("\"{LOCAL_STATE_FILE_NAME}\""))
+    let workspace = if let Some(target) = &cli.target {
+        Workspace::resolve(current_dir, cli.workspace.as_deref(), &target.module)?
     } else {
-        Cow::Borrowed("null")
+        Workspace::resolve_current(current_dir, cli.workspace.as_deref())?
     };
-    let logger = Logger::new(invocation.verbose);
+    let target_environment = cli
+        .target
+        .as_ref()
+        .and_then(|target| target.environment.as_ref());
+    let backend_override_value = if cli.use_local_backend {
+        LOCAL_BACKEND_OVERRIDE_VALUE
+    } else {
+        "null"
+    };
+    let logger = Logger::new(cli.verbose);
 
-    if matches!(&invocation.command, Commands::Tf { .. }) {
+    if let TargetCommand::Tf(args) = command {
         return run_terraform_target(
-            &invocation,
-            target,
+            cli,
+            args,
+            target_environment,
             &cue_bin,
             &workspace,
-            &backend_override_value,
+            backend_override_value,
             &logger,
         );
     }
 
     let discovered_env;
-    let env = if let Some(env) = target.environment.as_ref() {
+    let env = if let Some(env) = target_environment {
         env
     } else {
         debug!(logger, "Discovering populated environments");
-        discovered_env = environment::discover(&cue_bin, &workspace, &backend_override_value)?;
+        discovered_env = environment::discover(&cue_bin, &workspace, backend_override_value)?;
         &discovered_env
     };
 
-    log_target_configuration(&logger, &workspace, env, &cue_bin, &invocation.command);
+    log_target_configuration(&logger, &workspace, env, &cue_bin, &command);
 
-    match invocation.command {
-        Commands::Cue { command } => run_cue(
+    match command {
+        TargetCommand::Cue(command) => run_cue(
             &logger,
             &workspace,
             env,
             &cue_bin,
-            &backend_override_value,
-            &command,
+            backend_override_value,
+            command,
         )
         .map(Some),
-        Commands::Tf { .. } => {
+        TargetCommand::Tf(_) => {
             unreachable!("Terraform commands return before environment selection")
         }
-        Commands::Migrate { command } => {
+        TargetCommand::Migrate(command) => {
             let tf_bin = if matches!(
                 command,
                 MigrationCommand::Plan { .. } | MigrationCommand::Apply { .. }
             ) {
                 Some(resolve_tool(
-                    &invocation
-                        .tf_path
-                        .unwrap_or_else(|| PathBuf::from(DEFAULT_TF_BIN)),
+                    cli.tf_path
+                        .as_deref()
+                        .unwrap_or_else(|| std::path::Path::new(DEFAULT_TF_BIN)),
                 )?)
             } else {
                 None
@@ -180,55 +157,38 @@ fn run_target_command(
                 env,
                 cue_bin: &cue_bin,
                 tf_bin: tf_bin.as_deref(),
-                tfmigrate_path: invocation.tfmigrate_path.as_deref(),
-                timeout: invocation.timeout,
-                backend_override_value: &backend_override_value,
+                tfmigrate_path: cli.tfmigrate_path.as_deref(),
+                timeout: cli.timeout,
+                backend_override_value,
             }
-            .run(&command)
-        }
-        Commands::Modules { .. } => {
-            unreachable!("modules command handled before tool resolution")
-        }
-        Commands::Completions { .. } => {
-            unreachable!("completions command handled before tool resolution")
-        }
-        Commands::Version => {
-            unreachable!("version command handled before tool resolution")
+            .run(command)
         }
     }
 }
 
 fn run_terraform_target(
-    invocation: &TargetInvocation,
-    target: &Target,
+    cli: &Cli,
+    args: &[String],
+    target_environment: Option<&Env>,
     cue_bin: &std::path::Path,
     workspace: &Workspace,
     backend_override_value: &str,
     logger: &Logger,
 ) -> Result<Option<ExitStatus>> {
-    let Commands::Tf { args } = &invocation.command else {
-        unreachable!("Terraform target runner requires a Terraform command");
-    };
     let tf_bin = resolve_tool(
-        &invocation
-            .tf_path
-            .clone()
-            .unwrap_or_else(|| PathBuf::from(DEFAULT_TF_BIN)),
+        cli.tf_path
+            .as_deref()
+            .unwrap_or_else(|| std::path::Path::new(DEFAULT_TF_BIN)),
     )?;
     debug!(logger, "Tf Bin: {:?}", tf_bin);
     let desired_environments = environment::populated(cue_bin, workspace, backend_override_value)?;
     let initialized_environments = reconciliation::environment_names(workspace)?;
-    let selected_env;
-    let env = if let Some(env) = target.environment.as_ref() {
+    let env = if let Some(env) = target_environment {
         env
     } else {
-        let mut environments = desired_environments.clone();
-        environments.extend(initialized_environments);
-        selected_env = environment::select(environments)?;
-        &selected_env
+        environment::select(desired_environments.union(&initialized_environments))?
     };
-    let reconciliation =
-        reconciliation::inspect(logger, workspace, &tf_bin, env, invocation.timeout)?;
+    let reconciliation = reconciliation::inspect(logger, workspace, &tf_bin, env, cli.timeout)?;
     if !desired_environments.contains(env) && reconciliation.is_none() {
         reconciliation::remove_local(workspace, env)?;
         return Err(miette::miette!(
@@ -236,7 +196,7 @@ fn run_terraform_target(
         ));
     }
 
-    log_target_configuration(logger, workspace, env, cue_bin, &invocation.command);
+    log_target_configuration(logger, workspace, env, cue_bin, &TargetCommand::Tf(args));
     let metadata = TerraformMetadata {
         backend_override_value,
         reconciliation: reconciliation.as_ref(),
@@ -249,14 +209,14 @@ fn run_terraform_target(
         &tf_bin,
         &metadata,
         args,
-        invocation.timeout,
+        cli.timeout,
     )?;
     let command = args.iter().find(|argument| !argument.starts_with('-'));
     if status.success()
         && !desired_environments.contains(env)
         && command.is_some_and(|command| matches!(command.as_str(), "apply" | "destroy"))
     {
-        reconciliation::remove_if_empty(logger, workspace, &tf_bin, env, invocation.timeout)?;
+        reconciliation::remove_if_empty(logger, workspace, &tf_bin, env, cli.timeout)?;
     }
     Ok(Some(status))
 }
@@ -266,7 +226,7 @@ fn log_target_configuration(
     workspace: &Workspace,
     env: &Env,
     cue_bin: &std::path::Path,
-    command: &Commands,
+    command: &TargetCommand<'_>,
 ) {
     info!(
         logger,
@@ -1174,7 +1134,7 @@ fn parse_history_target(target: &str, default_env: &Env) -> Result<(String, Env)
 fn run_modules(
     command: &ModulesCommand,
     root: &std::path::Path,
-    cue_path: Option<PathBuf>,
+    cue_path: Option<&std::path::Path>,
     use_local_backend: bool,
     verbose: bool,
     output: &mut impl Write,
@@ -1188,17 +1148,17 @@ fn run_modules(
         }
         ModulesCommand::Check => {
             let cue_bin =
-                resolve_tool(&cue_path.unwrap_or_else(|| PathBuf::from(DEFAULT_CUE_BIN)))?;
+                resolve_tool(cue_path.unwrap_or_else(|| std::path::Path::new(DEFAULT_CUE_BIN)))?;
             let backend_override_value = if use_local_backend {
-                Cow::Owned(format!("\"{LOCAL_STATE_FILE_NAME}\""))
+                LOCAL_BACKEND_OVERRIDE_VALUE
             } else {
-                Cow::Borrowed("null")
+                "null"
             };
             check_modules(
                 &Logger::new(verbose),
                 root,
                 &cue_bin,
-                &backend_override_value,
+                backend_override_value,
             )
         }
     }
@@ -1214,10 +1174,10 @@ fn check_modules(
     let workspaces = discover_modules(root)?
         .into_iter()
         .map(|module| {
-            let workspace = Workspace::resolve(
+            let workspace = Workspace::resolve_workspace_relative(
                 root,
                 Some(root),
-                &ModuleTarget::WorkspaceRelative(PathBuf::from(&module)),
+                std::path::Path::new(&module),
             )?;
             Ok((module, workspace))
         })
@@ -1516,7 +1476,7 @@ esac
             },
         };
 
-        let status = run_from(cli, temp.path(), &mut Vec::new())?
+        let status = run_from(&cli, temp.path(), &mut Vec::new())?
             .expect("Terraform command should return a status");
 
         assert!(status.success());
@@ -1580,7 +1540,7 @@ if [[ $* == 'output -json' ]]; then printf '{{}}'; fi
             },
         };
 
-        let error = run_from(cli, temp.path(), &mut Vec::new())
+        let error = run_from(&cli, temp.path(), &mut Vec::new())
             .expect_err("empty historical environment should be rejected");
 
         assert!(error.to_string().contains("has no remaining state"));
@@ -1598,7 +1558,7 @@ if [[ $* == 'output -json' ]]; then printf '{{}}'; fi
         let cli = modules_cli(&temp)?;
 
         let mut output = Vec::new();
-        let status = run_from(cli, temp.path(), &mut output)?;
+        let status = run_from(&cli, temp.path(), &mut output)?;
 
         assert!(status.is_none());
         assert_eq!(output, b".\n");
@@ -1620,7 +1580,7 @@ if [[ $* == 'output -json' ]]; then printf '{{}}'; fi
         };
 
         let mut output = Vec::new();
-        let status = run_from(cli, Path::new("/missing-directory"), &mut output)?;
+        let status = run_from(&cli, Path::new("/missing-directory"), &mut output)?;
 
         assert!(status.is_none());
         assert_eq!(
@@ -1798,7 +1758,7 @@ if [[ $* == 'output -json' ]]; then printf '{{}}'; fi
         let temp = TestDirectory::new()?;
         let cli = modules_cli(&temp)?;
 
-        let error = run_from(cli, temp.path(), &mut BrokenPipe)
+        let error = run_from(&cli, temp.path(), &mut BrokenPipe)
             .expect_err("output failure should be reported");
 
         assert!(error.to_string().to_lowercase().contains("broken pipe"));
@@ -1868,7 +1828,7 @@ fi
             },
         };
 
-        let error = run_from(cli, temp.path(), &mut Vec::new())
+        let error = run_from(&cli, temp.path(), &mut Vec::new())
             .expect_err("invalid modules should be reported");
 
         let message = error.to_string();
@@ -1911,7 +1871,7 @@ fi
             command: ModulesCommand::Check,
         };
 
-        let status = run_from(cli, temp.path(), &mut Vec::new())?;
+        let status = run_from(&cli, temp.path(), &mut Vec::new())?;
 
         assert!(status.is_none());
         Ok(())
@@ -1995,7 +1955,7 @@ cp "$2" '{}'
             },
         };
 
-        let status = run_from(cli, temp.path(), &mut Vec::new())?
+        let status = run_from(&cli, temp.path(), &mut Vec::new())?
             .expect("migration should return its process status");
 
         assert!(status.success());
@@ -2029,7 +1989,7 @@ cp "$2" '{}'
         let (cue_bin, cue_marker, tf_bin, tf_marker) = write_module_migration_tools(&temp)?;
         let cli = module_migration_cli(&root, &cue_bin, &tf_bin, &temp, MigrationCommand::Check);
 
-        let status = run_from(cli, temp.path(), &mut Vec::new())?;
+        let status = run_from(&cli, temp.path(), &mut Vec::new())?;
 
         assert!(status.is_none());
         assert!(!tf_marker.exists());
@@ -2041,7 +2001,7 @@ cp "$2" '{}'
             MigrationCommand::Plan { args: Vec::new() },
         );
 
-        let status = run_from(cli, temp.path(), &mut Vec::new())?
+        let status = run_from(&cli, temp.path(), &mut Vec::new())?
             .expect("migration should return its process status");
 
         assert!(status.success());
@@ -2066,7 +2026,7 @@ cp "$2" '{}'
             MigrationCommand::Apply { args: Vec::new() },
         );
 
-        let status = run_from(cli, temp.path(), &mut Vec::new())?
+        let status = run_from(&cli, temp.path(), &mut Vec::new())?
             .expect("migration should return its process status");
 
         assert!(status.success());
