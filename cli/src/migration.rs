@@ -1,8 +1,10 @@
+use crate::app::{module_lock_path, workspace_module_path};
 use crate::cli::{Env, MigrationCommand, validate_env};
 use crate::environment;
 use crate::execution::{
     capture_tf_in, export_historical_backend, export_terraform, export_terraform_to,
-    export_terraform_with_backend_to, output_tf_in, resolve_tool, run_tf_in, run_tfmigrate,
+    export_terraform_with_backend_to, output_tf_in, read_backend_config, read_migration_metadata,
+    read_terraform_config, replace_root_backend, resolve_tool, run_tf_in, run_tfmigrate,
 };
 use crate::logger::Logger;
 use crate::workspace::Workspace;
@@ -37,6 +39,245 @@ pub struct ResourceIdentity {
     pub module: String,
     pub env: Env,
     pub name: String,
+}
+
+pub struct MigrationRunner<'a> {
+    logger: &'a Logger,
+    workspace: &'a Workspace,
+    env: &'a str,
+    cue_bin: &'a std::path::Path,
+    tf_bin: Option<&'a std::path::Path>,
+    tfmigrate_path: Option<&'a std::path::Path>,
+    timeout: Option<Duration>,
+    backend_override_value: &'a str,
+}
+
+impl<'a> MigrationRunner<'a> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        logger: &'a Logger,
+        workspace: &'a Workspace,
+        env: &'a str,
+        cue_bin: &'a std::path::Path,
+        tf_bin: Option<&'a std::path::Path>,
+        tfmigrate_path: Option<&'a std::path::Path>,
+        timeout: Option<Duration>,
+        backend_override_value: &'a str,
+    ) -> Self {
+        Self {
+            logger,
+            workspace,
+            env,
+            cue_bin,
+            tf_bin,
+            tfmigrate_path,
+            timeout,
+            backend_override_value,
+        }
+    }
+
+    fn tf_bin(&self) -> Result<&std::path::Path> {
+        self.tf_bin
+            .ok_or_else(|| miette::miette!("Migration command requires OpenTofu"))
+    }
+
+    fn module_planner(&self) -> Result<ModuleMigrationPlanner<'_>> {
+        Ok(ModuleMigrationPlanner::new(
+            self.logger,
+            self.workspace,
+            self.env,
+            self.cue_bin,
+            self.tf_bin()?,
+            self.timeout,
+        ))
+    }
+
+    pub fn run(
+        &self,
+        command: &MigrationCommand,
+        output: &mut impl Write,
+    ) -> Result<Option<ExitStatus>> {
+        let metadata: MigrationMetadata = read_migration_metadata(
+            self.workspace,
+            self.env,
+            self.cue_bin,
+            self.backend_override_value,
+        )?;
+        let transitions = self.current_transitions(&metadata);
+        if !metadata.module_history.is_empty() && !transitions.is_empty() {
+            return Err(miette::miette!(
+                "Module history and cross-state resource history cannot be migrated together"
+            ));
+        }
+
+        if let Some(target) = metadata.module_history.last() {
+            return self.run_module(command, target, output);
+        }
+
+        ResourceMigrationRunner::new(
+            self.logger,
+            self.workspace,
+            self.env,
+            self.cue_bin,
+            self.tf_bin,
+            self.tfmigrate_path,
+            self.timeout,
+            self.backend_override_value,
+        )
+        .run(command, &metadata, &transitions, output)
+    }
+
+    fn current_transitions<'m>(
+        &self,
+        metadata: &'m MigrationMetadata,
+    ) -> Vec<&'m ResourceTransition> {
+        metadata
+            .resource_transitions
+            .iter()
+            .filter(|transition| {
+                transition.to.module == self.workspace.module_name()
+                    && transition.to.env == self.env
+            })
+            .collect()
+    }
+
+    fn export_destination(&self) -> Result<(ExitStatus, PathBuf)> {
+        export_terraform(
+            self.logger,
+            self.workspace,
+            self.env,
+            self.cue_bin,
+            self.backend_override_value,
+        )
+    }
+
+    fn check_module_layout(&self, source_module: &str, source_env: &str) -> Result<()> {
+        let source_module_path = workspace_module_path(self.workspace.root(), source_module)?;
+        let source_lock = source_module_path
+            .join(".cuet")
+            .join(source_env)
+            .join(".terraform.lock.hcl");
+        let destination_lock = self
+            .workspace
+            .target_dir()
+            .join(".cuet")
+            .join(self.env)
+            .join(".terraform.lock.hcl");
+        let output_dir = self.workspace.target_dir().join(".cuet").join(self.env);
+        let scratch_dir = output_dir.with_file_name(format!("{}.migrate", self.env));
+        ensure_module_migration_files(&source_lock, &destination_lock, &output_dir, &scratch_dir)?;
+
+        let mut current = read_terraform_config(self.workspace, self.env, self.cue_bin)?;
+        let historical =
+            read_backend_config(self.workspace, source_module, source_env, self.cue_bin)?;
+        let has_required_providers = has_required_providers(&current);
+        if has_required_providers && !destination_lock.is_file() {
+            return Err(miette::miette!(
+                "Destination provider lock is missing at '{}'",
+                destination_lock.display()
+            ));
+        }
+        if has_required_providers
+            && std::fs::metadata(&destination_lock)
+                .into_diagnostic()?
+                .len()
+                == 0
+        {
+            return Err(miette::miette!(
+                "Destination provider lock is empty at '{}'",
+                destination_lock.display()
+            ));
+        }
+        replace_root_backend(&mut current, historical)?;
+        Ok(())
+    }
+
+    fn inspect_module<'m>(
+        &'m self,
+        source_module: &'m str,
+        source_env: &'m str,
+    ) -> Result<ModuleMigrationInspection<'m>> {
+        let source_backend =
+            read_backend_config(self.workspace, source_module, source_env, self.cue_bin)?;
+        let destination_backend = read_backend_config(
+            self.workspace,
+            self.workspace.module_name(),
+            self.env,
+            self.cue_bin,
+        )?;
+        let (source_backend, source_backend_location_complete) = inspected_backend(source_backend)?;
+        let (destination_backend, destination_backend_location_complete) =
+            inspected_backend(destination_backend)?;
+        Ok(ModuleMigrationInspection {
+            kind: "module",
+            source: MigrationEndpoint {
+                module: source_module,
+                environment: source_env,
+                backend: source_backend,
+                backend_location_complete: source_backend_location_complete,
+                lock_file: module_lock_path(source_module, source_env),
+            },
+            destination: MigrationEndpoint {
+                module: self.workspace.module_name(),
+                environment: self.env,
+                backend: destination_backend,
+                backend_location_complete: destination_backend_location_complete,
+                lock_file: module_lock_path(self.workspace.module_name(), self.env),
+            },
+        })
+    }
+
+    fn run_module(
+        &self,
+        command: &MigrationCommand,
+        target: &str,
+        output: &mut impl Write,
+    ) -> Result<Option<ExitStatus>> {
+        if self.backend_override_value != "null" {
+            return Err(miette::miette!(
+                "Module migrations cannot be combined with --use-local-backend"
+            ));
+        }
+        let (source_module, source_env) = parse_history_target(target, self.env)?;
+        if source_module == self.workspace.module_name() && source_env == self.env {
+            return Err(miette::miette!(
+                "The latest module history target is the current target"
+            ));
+        }
+        self.check_module_layout(source_module, source_env)?;
+        if matches!(command, MigrationCommand::Check) {
+            return Ok(None);
+        }
+        if matches!(command, MigrationCommand::Inspect) {
+            let inspection = self.inspect_module(source_module, source_env)?;
+            serde_json::to_writer_pretty(&mut *output, &inspection).into_diagnostic()?;
+            writeln!(output).into_diagnostic()?;
+            return Ok(None);
+        }
+        if !command.args().is_empty() {
+            return Err(miette::miette!(
+                "Additional migration arguments are supported only for resource migrations"
+            ));
+        }
+        let (status, destination_dir) = self.export_destination()?;
+        if !status.success() {
+            return Ok(Some(status));
+        }
+        let migration_dir = MigrationDirectory::new(
+            destination_dir.with_file_name(format!("{}.migrate", self.env)),
+        );
+
+        let status =
+            self.module_planner()?
+                .plan(source_module, source_env, migration_dir.path())?;
+        if !status.success() || matches!(command, MigrationCommand::Plan { .. }) {
+            return Ok(Some(status));
+        }
+
+        ModuleMigrationApplier::new(self.module_planner()?)
+            .apply(source_module, source_env, migration_dir.path())
+            .map(Some)
+    }
 }
 
 #[derive(Deserialize)]
