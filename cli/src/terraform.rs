@@ -241,10 +241,8 @@ fn join_output(handle: Option<thread::JoinHandle<io::Result<Vec<u8>>>>) -> Resul
 }
 
 fn command_string(command: &Command) -> String {
-    let program = command.get_program().to_str().unwrap();
-    let args = command
-        .get_args()
-        .map(|argument| argument.to_str().unwrap());
+    let program = command.get_program().to_string_lossy();
+    let args = command.get_args().map(OsStr::to_string_lossy);
     shell_words::join(std::iter::once(program).chain(args))
 }
 

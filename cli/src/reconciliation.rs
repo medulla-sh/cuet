@@ -34,13 +34,14 @@ pub fn environment_names(workspace: &Workspace) -> Result<BTreeSet<Env>> {
         if !entry.file_type().into_diagnostic()?.is_dir() {
             continue;
         }
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+        let Ok(name) = entry.file_name().into_string() else {
             continue;
         };
-        let Ok(environment) = parse_env(&name) else {
+        let Ok(environment) = parse_env(name) else {
             continue;
         };
-        if !entry.path().join(INIT_STATE_FILE).is_file() {
+        let path = entry.path();
+        if !path.join(INIT_STATE_FILE).is_file() {
             continue;
         }
         environments.insert(environment);
@@ -108,6 +109,13 @@ struct EnvironmentState {
     providers: BTreeSet<String>,
 }
 
+enum AddressSegment {
+    PrefixOrResource,
+    ModuleName,
+    ResourceAfterData,
+    Done,
+}
+
 fn inspect_state(
     logger: &Logger,
     tf_bin: &Path,
@@ -138,11 +146,14 @@ fn inspect_state(
                 "OpenTofu returned invalid state addresses for '{environment}': {error}"
             )
         })?;
-    let providers = resource_addresses
+    let providers: BTreeSet<String> = resource_addresses
         .lines()
         .filter(|address| !address.trim().is_empty())
         .map(provider_name)
-        .collect::<Result<BTreeSet<_>>>()?;
+        .collect::<Result<BTreeSet<_>>>()?
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
     if !providers.is_empty() {
         return Ok(EnvironmentState {
             has_state: true,
@@ -179,28 +190,19 @@ fn inspect_state(
     })
 }
 
-fn provider_name(address: &str) -> Result<String> {
-    let segments = address_segments(address)?;
-    let mut index = 0;
-    while segments.get(index) == Some(&"module") {
-        index += 2;
-    }
-    if segments.get(index) == Some(&"data") {
-        index += 1;
-    }
-    let resource_type = segments
-        .get(index)
-        .ok_or_else(|| miette::miette!("OpenTofu returned invalid resource address '{address}'"))?;
+fn provider_name(address: &str) -> Result<&str> {
+    let resource_type = resource_type(address)?;
     let (provider, _) = resource_type.split_once('_').ok_or_else(|| {
         miette::miette!(
             "Cannot infer a provider from resource type '{resource_type}' in state address '{address}'"
         )
     })?;
-    Ok(provider.to_owned())
+    Ok(provider)
 }
 
-fn address_segments(address: &str) -> Result<Vec<&str>> {
-    let mut segments = Vec::new();
+fn resource_type(address: &str) -> Result<&str> {
+    let mut state = AddressSegment::PrefixOrResource;
+    let mut resource_type = None;
     let mut start = 0;
     let mut bracket_depth = 0;
     let mut quoted = false;
@@ -221,7 +223,7 @@ fn address_segments(address: &str) -> Result<Vec<&str>> {
             '[' => bracket_depth += 1,
             ']' if bracket_depth > 0 => bracket_depth -= 1,
             '.' if bracket_depth == 0 => {
-                segments.push(&address[start..index]);
+                consume_address_segment(&address[start..index], &mut state, &mut resource_type);
                 start = index + 1;
             }
             _ => {}
@@ -232,8 +234,26 @@ fn address_segments(address: &str) -> Result<Vec<&str>> {
             "OpenTofu returned invalid resource address '{address}'"
         ));
     }
-    segments.push(&address[start..]);
-    Ok(segments)
+    consume_address_segment(&address[start..], &mut state, &mut resource_type);
+    resource_type
+        .ok_or_else(|| miette::miette!("OpenTofu returned invalid resource address '{address}'"))
+}
+
+fn consume_address_segment<'a>(
+    segment: &'a str,
+    state: &mut AddressSegment,
+    resource_type: &mut Option<&'a str>,
+) {
+    *state = match state {
+        AddressSegment::PrefixOrResource if segment == "module" => AddressSegment::ModuleName,
+        AddressSegment::PrefixOrResource if segment == "data" => AddressSegment::ResourceAfterData,
+        AddressSegment::PrefixOrResource | AddressSegment::ResourceAfterData => {
+            *resource_type = Some(segment);
+            AddressSegment::Done
+        }
+        AddressSegment::ModuleName => AddressSegment::PrefixOrResource,
+        AddressSegment::Done => AddressSegment::Done,
+    };
 }
 
 fn state_missing(stderr: &str) -> bool {
