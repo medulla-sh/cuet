@@ -11,8 +11,8 @@ use std::time::Duration;
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Reconciliation<'a> {
-    pub(crate) environment: &'a str,
-    pub(crate) required_providers: Vec<String>,
+    pub environment: &'a str,
+    pub required_providers: Vec<String>,
 }
 
 pub fn environment_names(workspace: &Workspace) -> Result<BTreeSet<Env>> {

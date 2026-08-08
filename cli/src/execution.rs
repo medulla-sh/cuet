@@ -713,15 +713,15 @@ mod tests {
 
     #[test]
     fn test_explicit_timeout_overrides_command_policy() {
-        let timeout = Duration::from_millis(275);
+        let explicit = Duration::from_millis(275);
 
         assert_eq!(
-            crate::terraform::timeout(&["output".to_owned()], Some(timeout)),
-            Some(timeout)
+            timeout(&["output".to_owned()], Some(explicit)),
+            Some(explicit)
         );
         assert_eq!(
-            crate::terraform::timeout(&["apply".to_owned()], Some(timeout)),
-            Some(timeout)
+            timeout(&["apply".to_owned()], Some(explicit)),
+            Some(explicit)
         );
     }
 

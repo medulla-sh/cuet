@@ -1,4 +1,4 @@
-use crate::cli::{Cli, Commands, CueCommand, Env, MigrationCommand, ModulesCommand};
+use crate::cli::{Cli, Commands, CueCommand, MigrationCommand, ModulesCommand};
 use crate::completions;
 use crate::environment;
 use crate::execution::{
@@ -87,7 +87,7 @@ fn run_target_command(
     let target_environment = cli
         .target
         .as_ref()
-        .and_then(|target| target.environment.as_ref());
+        .and_then(|target| target.environment.as_deref());
     let backend_override_value = if cli.use_local_backend {
         LOCAL_BACKEND_OVERRIDE_VALUE
     } else {
@@ -113,7 +113,7 @@ fn run_target_command(
     } else {
         debug!(logger, "Discovering populated environments");
         discovered_env = environment::discover(&cue_bin, &workspace, backend_override_value)?;
-        &discovered_env
+        discovered_env.as_str()
     };
 
     log_target_configuration(&logger, &workspace, env, &cue_bin, &command);
@@ -162,7 +162,7 @@ fn run_target_command(
 fn run_terraform_target(
     cli: &Cli,
     args: &[String],
-    target_environment: Option<&Env>,
+    target_environment: Option<&str>,
     cue_bin: &std::path::Path,
     workspace: &Workspace,
     backend_override_value: &str,
@@ -179,7 +179,11 @@ fn run_terraform_target(
     let env = if let Some(env) = target_environment {
         env
     } else {
-        environment::select(desired_environments.union(&initialized_environments))?
+        environment::select(
+            desired_environments
+                .union(&initialized_environments)
+                .map(String::as_str),
+        )?
     };
     let reconciliation = reconciliation::inspect(logger, workspace, &tf_bin, env, cli.timeout)?;
     if !desired_environments.contains(env) && reconciliation.is_none() {
@@ -217,7 +221,7 @@ fn run_terraform_target(
 fn log_target_configuration(
     logger: &Logger,
     workspace: &Workspace,
-    env: &Env,
+    env: &str,
     cue_bin: &std::path::Path,
     command: &TargetCommand<'_>,
 ) {

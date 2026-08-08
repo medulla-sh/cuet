@@ -20,24 +20,24 @@ const LOCAL_BACKEND_OVERRIDE_VALUE: &str = r#""local.tfstate""#;
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct MigrationMetadata {
-    pub module_history: Vec<String>,
-    pub resource_transitions: Vec<ResourceTransition>,
+struct MigrationMetadata {
+    module_history: Vec<String>,
+    resource_transitions: Vec<ResourceTransition>,
 }
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ResourceTransition {
-    pub resource_type: String,
-    pub from: ResourceIdentity,
-    pub to: ResourceIdentity,
+struct ResourceTransition {
+    resource_type: String,
+    from: ResourceIdentity,
+    to: ResourceIdentity,
 }
 
 #[derive(Deserialize, Serialize)]
-pub struct ResourceIdentity {
-    pub module: String,
-    pub env: Env,
-    pub name: String,
+struct ResourceIdentity {
+    module: String,
+    env: Env,
+    name: String,
 }
 
 pub struct MigrationRunner<'a> {
@@ -127,11 +127,7 @@ impl<'a> MigrationRunner<'a> {
             Preparation::CommandFailed(status) => return Ok(Some(status)),
         };
 
-        let migration = migration_document(
-            &prepared.source_dir,
-            prepared.from_skip_plan,
-            &prepared.actions,
-        );
+        let migration = migration_document(&prepared);
         let tfmigrate_bin = resolve_tool(
             self.tfmigrate_path
                 .unwrap_or_else(|| std::path::Path::new(DEFAULT_TFMIGRATE_BIN)),
@@ -636,14 +632,14 @@ pub enum DestinationAction {
     Current,
 }
 
-pub struct MigrationDirectory(PathBuf);
+struct MigrationDirectory(PathBuf);
 
 impl MigrationDirectory {
-    pub fn new(path: PathBuf) -> Self {
+    fn new(path: PathBuf) -> Self {
         Self(path)
     }
 
-    pub fn path(&self) -> &std::path::Path {
+    fn path(&self) -> &std::path::Path {
         &self.0
     }
 }
@@ -656,24 +652,24 @@ impl Drop for MigrationDirectory {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct MigrationEndpoint<'a> {
-    pub module: &'a str,
-    pub environment: &'a str,
-    pub backend: serde_json::Value,
-    pub backend_location_complete: bool,
-    pub lock_file: String,
+struct MigrationEndpoint<'a> {
+    module: &'a str,
+    environment: &'a str,
+    backend: serde_json::Value,
+    backend_location_complete: bool,
+    lock_file: String,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ModuleMigrationInspection<'a> {
-    pub kind: &'static str,
-    pub source: MigrationEndpoint<'a>,
-    pub destination: MigrationEndpoint<'a>,
+struct ModuleMigrationInspection<'a> {
+    kind: &'static str,
+    source: MigrationEndpoint<'a>,
+    destination: MigrationEndpoint<'a>,
 }
 
 #[derive(Serialize)]
-pub struct MigrationDocument<'a> {
+struct MigrationDocument<'a> {
     migration: MigrationBody<'a>,
 }
 
@@ -834,7 +830,7 @@ pub fn inspected_backend(mut config: serde_json::Value) -> Result<(serde_json::V
     Ok((serde_json::Value::Object(backend), complete))
 }
 
-pub fn has_required_providers(config: &serde_json::Value) -> bool {
+fn has_required_providers(config: &serde_json::Value) -> bool {
     config
         .get("terraform")
         .and_then(|terraform| terraform.get("required_providers"))
@@ -846,7 +842,7 @@ pub fn state_snapshot_missing(stderr: &str) -> bool {
     stderr.contains("No state file was found")
 }
 
-pub fn state_snapshot_metadata(output: &[u8]) -> Result<StateSnapshotMetadata> {
+fn state_snapshot_metadata(output: &[u8]) -> Result<StateSnapshotMetadata> {
     serde_json::from_slice(output)
         .into_diagnostic()
         .map_err(|error| miette::miette!("Failed to read state snapshot metadata: {error}"))
@@ -884,7 +880,7 @@ pub fn destination_action(
     ))
 }
 
-pub fn ensure_single_source(transitions: &[&ResourceTransition]) -> Result<()> {
+fn ensure_single_source(transitions: &[&ResourceTransition]) -> Result<()> {
     let sources: BTreeSet<_> = transitions
         .iter()
         .map(|transition| (&transition.from.module, &transition.from.env))
@@ -897,7 +893,7 @@ pub fn ensure_single_source(transitions: &[&ResourceTransition]) -> Result<()> {
     Ok(())
 }
 
-pub fn resource_actions(transitions: &[&ResourceTransition]) -> Vec<String> {
+fn resource_actions(transitions: &[&ResourceTransition]) -> Vec<String> {
     let mut actions: Vec<_> = transitions
         .iter()
         .map(|transition| {
@@ -912,19 +908,15 @@ pub fn resource_actions(transitions: &[&ResourceTransition]) -> Vec<String> {
     actions
 }
 
-pub fn migration_document<'a>(
-    source_dir: &'a std::path::Path,
-    from_skip_plan: bool,
-    actions: &'a [String],
-) -> MigrationDocument<'a> {
+fn migration_document(prepared: &PreparedMigration) -> MigrationDocument<'_> {
     MigrationDocument {
         migration: MigrationBody {
             multi_state: MultiStateMigration {
                 cuet: CuetMigration {
-                    from_dir: source_dir,
-                    from_skip_plan,
+                    from_dir: &prepared.source_dir,
+                    from_skip_plan: prepared.from_skip_plan,
                     to_dir: ".",
-                    actions,
+                    actions: &prepared.actions,
                 },
             },
         },
