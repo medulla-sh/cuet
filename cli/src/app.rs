@@ -11,8 +11,6 @@ use crate::workspace::{Workspace, discover_modules, resolve_root};
 use clap::CommandFactory;
 use miette::{IntoDiagnostic, Result};
 use std::io::{self, Write};
-use std::path::Component;
-use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::thread;
 
@@ -247,29 +245,6 @@ fn log_target_configuration(
         env,
         command
     );
-}
-
-pub fn workspace_module_path(root: &std::path::Path, module: &str) -> Result<PathBuf> {
-    let path = std::path::Path::new(module);
-    if module.is_empty()
-        || path
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
-        return Err(miette::miette!(
-            "Historical module must be a workspace-relative path: {module}"
-        ));
-    }
-    Ok(root.join(path))
-}
-
-pub fn module_lock_path(module: &str, env: &str) -> String {
-    std::path::Path::new(module)
-        .join(".cuet")
-        .join(env)
-        .join(".terraform.lock.hcl")
-        .to_string_lossy()
-        .into_owned()
 }
 
 fn run_modules(
