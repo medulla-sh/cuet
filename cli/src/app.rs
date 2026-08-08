@@ -1,6 +1,4 @@
-use crate::cli::{
-    Cli, Commands, CueCommand, Env, MigrationCommand, ModuleTarget, ModulesCommand, parse_env,
-};
+use crate::cli::{Cli, Commands, CueCommand, Env, MigrationCommand, ModulesCommand, validate_env};
 use crate::completions;
 use crate::environment;
 use crate::execution::{
@@ -10,12 +8,17 @@ use crate::execution::{
     resolve_tool, run_cue, run_tf_in, run_tf_with_metadata, run_tfmigrate,
 };
 use crate::logger::Logger;
+use crate::migration::{
+    DestinationAction, StateSnapshot, StateSnapshotMetadata, destination_action,
+    ensure_default_workspace, ensure_migrated_snapshot, ensure_module_migration_files,
+    state_snapshot_missing,
+};
 use crate::reconciliation;
 use crate::workspace::{Workspace, discover_modules, resolve_root};
 use clap::CommandFactory;
 use miette::{IntoDiagnostic, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::io::{self, Write};
 use std::path::Component;
 use std::path::PathBuf;
@@ -67,11 +70,13 @@ fn run_from(
             Ok(None)
         }
         Commands::Cue { command } => {
-            run_target_command(cli, TargetCommand::Cue(command), current_dir)
+            run_target_command(cli, TargetCommand::Cue(command), current_dir, output)
         }
-        Commands::Tf { args } => run_target_command(cli, TargetCommand::Tf(args), current_dir),
+        Commands::Tf { args } => {
+            run_target_command(cli, TargetCommand::Tf(args), current_dir, output)
+        }
         Commands::Migrate { command } => {
-            run_target_command(cli, TargetCommand::Migrate(command), current_dir)
+            run_target_command(cli, TargetCommand::Migrate(command), current_dir, output)
         }
     }
 }
@@ -80,6 +85,7 @@ fn run_target_command(
     cli: &Cli,
     command: TargetCommand<'_>,
     current_dir: &std::path::Path,
+    output: &mut impl Write,
 ) -> Result<Option<ExitStatus>> {
     let cue_bin = resolve_tool(
         cli.cue_path
@@ -161,7 +167,7 @@ fn run_target_command(
                 timeout: cli.timeout,
                 backend_override_value,
             }
-            .run(command)
+            .run(command, output)
         }
     }
 }
@@ -276,24 +282,6 @@ struct ResourceIdentity {
     name: String,
 }
 
-#[derive(Deserialize)]
-struct StateSnapshotMetadata {
-    lineage: String,
-    serial: u64,
-    #[serde(flatten)]
-    contents: BTreeMap<String, serde_json::Value>,
-}
-
-enum StateSnapshot {
-    Missing,
-    Present(StateSnapshotMetadata),
-}
-
-enum DestinationAction {
-    Copy,
-    Current,
-}
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct MigrationEndpoint<'a> {
@@ -356,7 +344,7 @@ impl Drop for MigrationDirectory {
 struct MigrationRunner<'a> {
     logger: &'a Logger,
     workspace: &'a Workspace,
-    env: &'a Env,
+    env: &'a str,
     cue_bin: &'a std::path::Path,
     tf_bin: Option<&'a std::path::Path>,
     tfmigrate_path: Option<&'a std::path::Path>,
@@ -381,7 +369,11 @@ impl MigrationRunner<'_> {
             .ok_or_else(|| miette::miette!("Migration command requires OpenTofu"))
     }
 
-    fn run(&self, command: &MigrationCommand) -> Result<Option<ExitStatus>> {
+    fn run(
+        &self,
+        command: &MigrationCommand,
+        output: &mut impl Write,
+    ) -> Result<Option<ExitStatus>> {
         let metadata: MigrationMetadata = read_migration_metadata(
             self.workspace,
             self.env,
@@ -396,7 +388,7 @@ impl MigrationRunner<'_> {
         }
 
         if let Some(target) = metadata.module_history.last() {
-            return self.run_module(command, target);
+            return self.run_module(command, target, output);
         }
 
         if matches!(command, MigrationCommand::Check) {
@@ -410,10 +402,8 @@ impl MigrationRunner<'_> {
             return Ok(None);
         }
         if matches!(command, MigrationCommand::Inspect) {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&metadata).into_diagnostic()?
-            );
+            serde_json::to_writer_pretty(&mut *output, &metadata).into_diagnostic()?;
+            writeln!(output).into_diagnostic()?;
             return Ok(None);
         }
 
@@ -421,12 +411,9 @@ impl MigrationRunner<'_> {
         if !status.success() {
             return Ok(Some(status));
         }
-        let preparation = self.prepare_resources(&transitions, &destination_dir)?;
-        let Preparation::Ready(prepared) = preparation else {
-            let Preparation::CommandFailed(status) = preparation else {
-                unreachable!()
-            };
-            return Ok(Some(status));
+        let prepared = match self.prepare_resources(&transitions, &destination_dir)? {
+            Preparation::Ready(prepared) => prepared,
+            Preparation::CommandFailed(status) => return Ok(Some(status)),
         };
 
         let migration = migration_document(&prepared);
@@ -440,8 +427,7 @@ impl MigrationRunner<'_> {
         run_tfmigrate(
             self.logger,
             &tfmigrate_bin,
-            self.tf_bin
-                .ok_or_else(|| miette::miette!("Migration command requires OpenTofu"))?,
+            self.tf_bin()?,
             operation,
             args,
             &destination_dir,
@@ -460,7 +446,7 @@ impl MigrationRunner<'_> {
             .iter()
             .filter(|transition| {
                 transition.to.module == self.workspace.module_name()
-                    && transition.to.env == *self.env
+                    && transition.to.env == self.env
             })
             .collect()
     }
@@ -475,7 +461,7 @@ impl MigrationRunner<'_> {
         )
     }
 
-    fn check_module_layout(&self, source_module: &str, source_env: &Env) -> Result<()> {
+    fn check_module_layout(&self, source_module: &str, source_env: &str) -> Result<()> {
         let source_module_path = workspace_module_path(self.workspace.root(), source_module)?;
         let source_lock = source_module_path
             .join(".cuet")
@@ -519,7 +505,7 @@ impl MigrationRunner<'_> {
     fn inspect_module<'m>(
         &'m self,
         source_module: &'m str,
-        source_env: &'m Env,
+        source_env: &'m str,
     ) -> Result<ModuleMigrationInspection<'m>> {
         let source_backend =
             read_backend_config(self.workspace, source_module, source_env, self.cue_bin)?;
@@ -551,28 +537,31 @@ impl MigrationRunner<'_> {
         })
     }
 
-    fn run_module(&self, command: &MigrationCommand, target: &str) -> Result<Option<ExitStatus>> {
+    fn run_module(
+        &self,
+        command: &MigrationCommand,
+        target: &str,
+        output: &mut impl Write,
+    ) -> Result<Option<ExitStatus>> {
         if self.backend_override_value != "null" {
             return Err(miette::miette!(
                 "Module migrations cannot be combined with --use-local-backend"
             ));
         }
         let (source_module, source_env) = parse_history_target(target, self.env)?;
-        if source_module == self.workspace.module_name() && source_env == *self.env {
+        if source_module == self.workspace.module_name() && source_env == self.env {
             return Err(miette::miette!(
                 "The latest module history target is the current target"
             ));
         }
-        self.check_module_layout(&source_module, &source_env)?;
+        self.check_module_layout(source_module, source_env)?;
         if matches!(command, MigrationCommand::Check) {
             return Ok(None);
         }
         if matches!(command, MigrationCommand::Inspect) {
-            let inspection = self.inspect_module(&source_module, &source_env)?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&inspection).into_diagnostic()?
-            );
+            let inspection = self.inspect_module(source_module, source_env)?;
+            serde_json::to_writer_pretty(&mut *output, &inspection).into_diagnostic()?;
+            writeln!(output).into_diagnostic()?;
             return Ok(None);
         }
         if !command.args().is_empty() {
@@ -588,19 +577,19 @@ impl MigrationRunner<'_> {
             destination_dir.with_file_name(format!("{}.migrate", self.env)),
         );
 
-        let status = self.plan_module(&source_module, &source_env, migration_dir.path())?;
+        let status = self.plan_module(source_module, source_env, migration_dir.path())?;
         if !status.success() || matches!(command, MigrationCommand::Plan { .. }) {
             return Ok(Some(status));
         }
 
-        self.apply_module(&source_module, &source_env, migration_dir.path())
+        self.apply_module(source_module, source_env, migration_dir.path())
             .map(Some)
     }
 
     fn apply_module(
         &self,
         source_module: &str,
-        source_env: &Env,
+        source_env: &str,
         migration_dir: &std::path::Path,
     ) -> Result<ExitStatus> {
         let status = self.prepare_module_source(source_module, source_env, migration_dir)?;
@@ -686,7 +675,7 @@ impl MigrationRunner<'_> {
     fn plan_module(
         &self,
         source_module: &str,
-        source_env: &Env,
+        source_env: &str,
         migration_dir: &std::path::Path,
     ) -> Result<ExitStatus> {
         let status = self.prepare_module_source(source_module, source_env, migration_dir)?;
@@ -787,7 +776,7 @@ impl MigrationRunner<'_> {
     fn prepare_module_source(
         &self,
         source_module: &str,
-        source_env: &Env,
+        source_env: &str,
         migration_dir: &std::path::Path,
     ) -> Result<ExitStatus> {
         if migration_dir.exists() {
@@ -863,10 +852,10 @@ impl MigrationRunner<'_> {
             ));
         };
         ensure_single_source(transitions)?;
-        let source_workspace = Workspace::resolve(
+        let source_workspace = Workspace::resolve_workspace_relative(
             self.workspace.root(),
             Some(self.workspace.root()),
-            &ModuleTarget::WorkspaceRelative(PathBuf::from(&first.from.module)),
+            std::path::Path::new(&first.from.module),
         )?;
         let (status, source_dir, from_skip_plan) =
             self.export_resource_source(&source_workspace, first, destination_dir)?;
@@ -914,22 +903,6 @@ impl MigrationRunner<'_> {
     }
 }
 
-fn ensure_default_workspace(output: &[u8]) -> Result<()> {
-    let output = String::from_utf8_lossy(output);
-    let workspaces: Vec<_> = output
-        .lines()
-        .map(|workspace| workspace.trim_start_matches('*').trim())
-        .filter(|workspace| !workspace.is_empty())
-        .collect();
-    if workspaces != ["default"] {
-        return Err(miette::miette!(
-            "Module migration requires exactly the default workspace; found: {}",
-            workspaces.join(", ")
-        ));
-    }
-    Ok(())
-}
-
 fn workspace_module_path(root: &std::path::Path, module: &str) -> Result<PathBuf> {
     let path = std::path::Path::new(module);
     if module.is_empty()
@@ -944,41 +917,7 @@ fn workspace_module_path(root: &std::path::Path, module: &str) -> Result<PathBuf
     Ok(root.join(path))
 }
 
-fn ensure_module_migration_files(
-    source_lock: &std::path::Path,
-    destination_lock: &std::path::Path,
-    output_dir: &std::path::Path,
-    scratch_dir: &std::path::Path,
-) -> Result<()> {
-    if source_lock.exists() {
-        return Err(miette::miette!(
-            "Historical provider lock still exists at '{}'; move it to '{}'",
-            source_lock.display(),
-            destination_lock.display()
-        ));
-    }
-    for artifact in [
-        output_dir.join("tfmigrate.json"),
-        output_dir.join("_tfmigrate_override.tf"),
-        output_dir.join(".tfmigrate"),
-    ] {
-        if artifact.exists() {
-            return Err(miette::miette!(
-                "Stale tfmigrate artifact exists at '{}'; remove it for native module migration",
-                artifact.display()
-            ));
-        }
-    }
-    if scratch_dir.exists() {
-        return Err(miette::miette!(
-            "Stale module migration directory exists at '{}'; remove it before continuing",
-            scratch_dir.display()
-        ));
-    }
-    Ok(())
-}
-
-fn module_lock_path(module: &str, env: &Env) -> String {
+fn module_lock_path(module: &str, env: &str) -> String {
     std::path::Path::new(module)
         .join(".cuet")
         .join(env)
@@ -1050,46 +989,10 @@ fn has_required_providers(config: &serde_json::Value) -> bool {
         .is_some_and(|providers| !providers.is_empty())
 }
 
-fn state_snapshot_missing(stderr: &str) -> bool {
-    stderr.contains("No state file was found")
-}
-
 fn state_snapshot_metadata(output: &[u8]) -> Result<StateSnapshotMetadata> {
     serde_json::from_slice(output)
         .into_diagnostic()
         .map_err(|error| miette::miette!("Failed to read state snapshot metadata: {error}"))
-}
-
-fn ensure_migrated_snapshot(
-    source: &StateSnapshotMetadata,
-    destination: &StateSnapshotMetadata,
-) -> Result<()> {
-    if source.lineage != destination.lineage || destination.serial < source.serial {
-        return Err(miette::miette!(
-            "The destination state does not contain the migrated source snapshot"
-        ));
-    }
-    Ok(())
-}
-
-fn destination_action(
-    source: &StateSnapshotMetadata,
-    destination: &StateSnapshot,
-) -> Result<DestinationAction> {
-    let StateSnapshot::Present(destination) = destination else {
-        return Ok(DestinationAction::Copy);
-    };
-    if destination.lineage != source.lineage {
-        return Err(miette::miette!(
-            "Destination state is non-empty and has unrelated lineage"
-        ));
-    }
-    if destination.serial == source.serial && destination.contents == source.contents {
-        return Ok(DestinationAction::Current);
-    }
-    Err(miette::miette!(
-        "Destination state does not exactly match the source snapshot"
-    ))
 }
 
 fn ensure_single_source(transitions: &[&ResourceTransition]) -> Result<()> {
@@ -1135,18 +1038,14 @@ fn migration_document(prepared: &PreparedMigration) -> MigrationDocument<'_> {
     }
 }
 
-fn parse_history_target(target: &str, default_env: &Env) -> Result<(String, Env)> {
-    let (module, env) = target
-        .split_once(':')
-        .map_or((target, default_env.clone()), |(module, env)| {
-            (module, env.to_owned())
-        });
+fn parse_history_target<'a>(target: &'a str, default_env: &'a str) -> Result<(&'a str, &'a str)> {
+    let (module, env) = target.split_once(':').unwrap_or((target, default_env));
     let module = module.strip_prefix('/').unwrap_or(module);
     if module.is_empty() {
         return Err(miette::miette!("History target module cannot be empty"));
     }
-    let env = parse_env(&env).map_err(|error| miette::miette!(error))?;
-    Ok((module.to_owned(), env))
+    validate_env(env).map_err(|error| miette::miette!(error))?;
+    Ok((module, env))
 }
 
 fn run_modules(
@@ -1293,12 +1192,13 @@ fn check_modules(
 
 #[cfg(test)]
 mod tests {
-    use super::{
+    use super::{inspected_backend, parse_history_target, run_from};
+    use crate::cli::{Cli, Commands, MigrationCommand, ModuleTarget, ModulesCommand, Target};
+    use crate::migration::{
         DestinationAction, StateSnapshot, StateSnapshotMetadata, destination_action,
         ensure_default_workspace, ensure_migrated_snapshot, ensure_module_migration_files,
-        inspected_backend, parse_history_target, run_from, state_snapshot_missing,
+        state_snapshot_missing,
     };
-    use crate::cli::{Cli, Commands, MigrationCommand, ModuleTarget, ModulesCommand, Target};
     use crate::test_directory::TestDirectory;
     use miette::{IntoDiagnostic, Result};
     use std::collections::BTreeMap;
@@ -1609,14 +1509,60 @@ if [[ $* == 'output -json' ]]; then printf '{{}}'; fi
     }
 
     #[test]
+    fn test_migration_inspect_writes_to_output_sink() -> Result<()> {
+        let temp = TestDirectory::new()?;
+        let root = temp.path().join("workspace");
+        let module = root.join("service");
+        fs::create_dir_all(&module).into_diagnostic()?;
+        fs::write(root.join(".cuetroot.cue"), "").into_diagnostic()?;
+        fs::write(module.join("cuet.cue"), "").into_diagnostic()?;
+        let cue_bin = temp.path().join("cue");
+        temp.write_executable(
+            &cue_bin,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s' '{"moduleHistory":[],"resourceTransitions":[{"resourceType":"neon_project","from":{"module":"old","env":"dev","name":"old"},"to":{"module":"service","env":"dev","name":"new"}}]}'
+"#,
+        )?;
+        let cli = Cli {
+            verbose: false,
+            target: Some(Target {
+                module: ModuleTarget::WorkspaceRelative(PathBuf::from("service")),
+                environment: Some("dev".to_owned()),
+            }),
+            workspace: Some(root),
+            cue_path: Some(cue_bin),
+            tf_path: None,
+            tfmigrate_path: None,
+            timeout: None,
+            use_local_backend: false,
+            command: Commands::Migrate {
+                command: MigrationCommand::Inspect,
+            },
+        };
+        let mut output = Vec::new();
+
+        let status = run_from(&cli, temp.path(), &mut output)?;
+
+        assert!(status.is_none());
+        assert!(output.ends_with(b"\n"));
+        let inspection: serde_json::Value = serde_json::from_slice(&output).into_diagnostic()?;
+        assert_eq!(
+            inspection["resourceTransitions"][0]["to"]["module"],
+            "service"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_history_target_defaults_environment_and_accepts_workspace_prefix() -> Result<()> {
         assert_eq!(
-            parse_history_target("/infra/old", &"prod".to_owned())?,
-            ("infra/old".to_owned(), "prod".to_owned())
+            parse_history_target("/infra/old", "prod")?,
+            ("infra/old", "prod")
         );
         assert_eq!(
-            parse_history_target("infra/old:dev", &"prod".to_owned())?,
-            ("infra/old".to_owned(), "dev".to_owned())
+            parse_history_target("infra/old:dev", "prod")?,
+            ("infra/old", "dev")
         );
         Ok(())
     }

@@ -8,6 +8,7 @@ mod cli;
 mod completions;
 mod environment;
 mod execution;
+mod migration;
 mod reconciliation;
 mod terraform;
 #[cfg(test)]
