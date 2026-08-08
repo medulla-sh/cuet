@@ -310,9 +310,124 @@ impl<'a> MigrationRunner<'a> {
             return Ok(Some(status));
         }
 
-        ModuleMigrationApplier::new(self.module_planner()?)
-            .apply(source_module, source_env, migration_dir.path())
+        self.apply_module(source_module, source_env, migration_dir.path())
             .map(Some)
+    }
+
+    fn apply_module(
+        &self,
+        source_module: &str,
+        source_env: &str,
+        migration_dir: &std::path::Path,
+    ) -> Result<ExitStatus> {
+        let planner = self.module_planner()?;
+        let status = planner.prepare_source(source_module, source_env, migration_dir)?;
+        if !status.success() {
+            return Ok(status);
+        }
+        let StateSnapshot::Present(source_metadata) = planner.read_state_snapshot(migration_dir)?
+        else {
+            return Err(miette::miette!(
+                "Source state is missing; cannot verify that the migration was previously applied"
+            ));
+        };
+
+        let destination_dir = MigrationDirectory::new(
+            migration_dir.with_file_name(format!("{}.destination", self.env)),
+        );
+        let status = self.prepare_module_destination(&planner, destination_dir.path())?;
+        if !status.success() {
+            return Ok(status);
+        }
+        if matches!(
+            destination_action(
+                &source_metadata,
+                &planner.read_state_snapshot(destination_dir.path())?
+            )?,
+            DestinationAction::Current
+        ) {
+            return run_tf_in(
+                self.logger,
+                self.tf_bin()?,
+                destination_dir.path(),
+                &["plan", "-detailed-exitcode", "-lock-timeout=5m"],
+                self.timeout,
+            );
+        }
+        let status = export_terraform_to(
+            self.logger,
+            self.workspace,
+            self.env,
+            self.cue_bin,
+            "null",
+            migration_dir,
+        )?;
+        if !status.success() {
+            return Ok(status);
+        }
+        let status = run_tf_in(
+            self.logger,
+            self.tf_bin()?,
+            migration_dir,
+            &[
+                "init",
+                "-migrate-state",
+                "-lockfile=readonly",
+                "-lock-timeout=5m",
+            ],
+            self.timeout,
+        )?;
+        if !status.success() {
+            return Ok(status);
+        }
+        let destination_state = output_tf_in(
+            self.logger,
+            self.tf_bin()?,
+            migration_dir,
+            &["state", "pull"],
+            self.timeout,
+        )?;
+        if !destination_state.status.success() {
+            return Ok(destination_state.status);
+        }
+        let destination_metadata = state_snapshot_metadata(&destination_state.stdout)?;
+        ensure_migrated_snapshot(&source_metadata, &destination_metadata)?;
+        run_tf_in(
+            self.logger,
+            self.tf_bin()?,
+            migration_dir,
+            &["plan", "-detailed-exitcode", "-lock-timeout=5m"],
+            self.timeout,
+        )
+    }
+
+    fn prepare_module_destination(
+        &self,
+        planner: &ModuleMigrationPlanner<'_>,
+        destination_dir: &std::path::Path,
+    ) -> Result<ExitStatus> {
+        if destination_dir.exists() {
+            std::fs::remove_dir_all(destination_dir).into_diagnostic()?;
+        }
+        let status = export_terraform_to(
+            self.logger,
+            self.workspace,
+            self.env,
+            self.cue_bin,
+            "null",
+            destination_dir,
+        )?;
+        if !status.success() {
+            return Ok(status);
+        }
+        planner.copy_provider_lock(destination_dir)?;
+        run_tf_in(
+            self.logger,
+            self.tf_bin()?,
+            destination_dir,
+            &["init", "-input=false", "-lockfile=readonly"],
+            self.timeout,
+        )
     }
 
     fn prepare_resources(
@@ -583,130 +698,6 @@ impl<'a> ModuleMigrationPlanner<'a> {
                 })?;
         }
         Ok(())
-    }
-}
-
-pub struct ModuleMigrationApplier<'a> {
-    planner: ModuleMigrationPlanner<'a>,
-}
-
-impl<'a> ModuleMigrationApplier<'a> {
-    pub fn new(planner: ModuleMigrationPlanner<'a>) -> Self {
-        Self { planner }
-    }
-
-    pub fn apply(
-        &self,
-        source_module: &str,
-        source_env: &str,
-        migration_dir: &std::path::Path,
-    ) -> Result<ExitStatus> {
-        let status = self
-            .planner
-            .prepare_source(source_module, source_env, migration_dir)?;
-        if !status.success() {
-            return Ok(status);
-        }
-        let StateSnapshot::Present(source_metadata) =
-            self.planner.read_state_snapshot(migration_dir)?
-        else {
-            return Err(miette::miette!(
-                "Source state is missing; cannot verify that the migration was previously applied"
-            ));
-        };
-
-        let destination_dir = MigrationDirectory::new(
-            migration_dir.with_file_name(format!("{}.destination", self.planner.env)),
-        );
-        let status = self.prepare_destination(destination_dir.path())?;
-        if !status.success() {
-            return Ok(status);
-        }
-        if matches!(
-            destination_action(
-                &source_metadata,
-                &self.planner.read_state_snapshot(destination_dir.path())?
-            )?,
-            DestinationAction::Current
-        ) {
-            return run_tf_in(
-                self.planner.logger,
-                self.planner.tf_bin,
-                destination_dir.path(),
-                &["plan", "-detailed-exitcode", "-lock-timeout=5m"],
-                self.planner.timeout,
-            );
-        }
-        let status = export_terraform_to(
-            self.planner.logger,
-            self.planner.workspace,
-            self.planner.env,
-            self.planner.cue_bin,
-            "null",
-            migration_dir,
-        )?;
-        if !status.success() {
-            return Ok(status);
-        }
-        let status = run_tf_in(
-            self.planner.logger,
-            self.planner.tf_bin,
-            migration_dir,
-            &[
-                "init",
-                "-migrate-state",
-                "-lockfile=readonly",
-                "-lock-timeout=5m",
-            ],
-            self.planner.timeout,
-        )?;
-        if !status.success() {
-            return Ok(status);
-        }
-        let destination_state = output_tf_in(
-            self.planner.logger,
-            self.planner.tf_bin,
-            migration_dir,
-            &["state", "pull"],
-            self.planner.timeout,
-        )?;
-        if !destination_state.status.success() {
-            return Ok(destination_state.status);
-        }
-        let destination_metadata = state_snapshot_metadata(&destination_state.stdout)?;
-        ensure_migrated_snapshot(&source_metadata, &destination_metadata)?;
-        run_tf_in(
-            self.planner.logger,
-            self.planner.tf_bin,
-            migration_dir,
-            &["plan", "-detailed-exitcode", "-lock-timeout=5m"],
-            self.planner.timeout,
-        )
-    }
-
-    fn prepare_destination(&self, destination_dir: &std::path::Path) -> Result<ExitStatus> {
-        if destination_dir.exists() {
-            std::fs::remove_dir_all(destination_dir).into_diagnostic()?;
-        }
-        let status = export_terraform_to(
-            self.planner.logger,
-            self.planner.workspace,
-            self.planner.env,
-            self.planner.cue_bin,
-            "null",
-            destination_dir,
-        )?;
-        if !status.success() {
-            return Ok(status);
-        }
-        self.planner.copy_provider_lock(destination_dir)?;
-        run_tf_in(
-            self.planner.logger,
-            self.planner.tf_bin,
-            destination_dir,
-            &["init", "-input=false", "-lockfile=readonly"],
-            self.planner.timeout,
-        )
     }
 }
 
