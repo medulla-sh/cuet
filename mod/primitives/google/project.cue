@@ -7,19 +7,24 @@ import (
 
 #GcpServices:
 	"artifactregistry.googleapis.com" |
+	"cloudresourcemanager.googleapis.com" |
 	"cloudtrace.googleapis.com" |
-	"container.googleapis.com" |
 	"compute.googleapis.com" |
+	"connectgateway.googleapis.com" |
+	"container.googleapis.com" |
+	"gkeconnect.googleapis.com" |
 	"gkehub.googleapis.com" |
 	"iam.googleapis.com" |
+	"iamcredentials.googleapis.com" |
+	"logging.googleapis.com" |
 	"meshca.googleapis.com" |
 	"meshconfig.googleapis.com" |
-	"logging.googleapis.com" |
 	"monitoring.googleapis.com" |
 	"networksecurity.googleapis.com" |
 	"networkservices.googleapis.com" |
 	"run.googleapis.com" |
 	"secretmanager.googleapis.com" |
+	"sts.googleapis.com" |
 	"telemetry.googleapis.com" |
 	"trafficdirector.googleapis.com"
 
@@ -36,7 +41,8 @@ import (
 		billingAccount?: string
 		{orgId: string} | {folderId: string} | *{}
 
-		enabledServices: [#GcpServices, ...]
+		enabledServices: [...#GcpServices]
+		enabledServices: [_, ...]
 	}
 	ref: "google_project.\(in.name)"
 	out: T.#TerraformInput & {
