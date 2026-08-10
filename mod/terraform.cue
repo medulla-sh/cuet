@@ -36,7 +36,8 @@ package cuet
 		...
 	}
 
-	data?: [string]: [string]: _
+	data?: [string]: [string]:      _
+	ephemeral?: [string]: [string]: _
 
 	variable?: [string]: {
 		type?:        string
@@ -76,6 +77,7 @@ package cuet
 	resource?: [string]: [string]: {...}
 
 	data?: [string]: [string]: {...}
+	ephemeral?: [string]: [string]: {...}
 
 	variable?: [string]: {
 		type?:        string

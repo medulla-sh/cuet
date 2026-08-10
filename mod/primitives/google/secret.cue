@@ -89,12 +89,15 @@ import (
 
 		project:  string
 		secretId: string
+		version:  string
+		version:  _ | *"latest"
 	}
-	ref: "data.google_secret_manager_secret_version.\(in.name)"
+	ref: "ephemeral.google_secret_manager_secret_version.\(in.name)"
 	out: T.#TerraformInput & {
-		data: "google_secret_manager_secret_version": (in.name): {
+		ephemeral: "google_secret_manager_secret_version": (in.name): {
 			project: in.project
 			secret:  in.secretId
+			version: in.version
 		}
 	}
 }

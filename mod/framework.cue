@@ -287,29 +287,11 @@ _#RenderTerraformInput: {
 		if len(*in.locals | {}) > 0 {locals: in.locals}
 		if len(*in.output | {}) > 0 {output: in.output}
 
-		if len(*in.data | {}) > 0 {
-			data: {
-				for sourceName, blocks in in.data
-				for blockName, block in blocks {
-					let providerName = [
-						if block.#provider != _|_ {block.#provider},
-						strings.SplitN(sourceName, "_", 2)[0],
-					][0]
-					(sourceName): (blockName): block & {
-						if block.#provider != _|_ || block.#providerAlias != _|_ {
-							"provider": [
-								if block.#providerAlias != _|_ {"\(providerName).\(block.#providerAlias)"},
-								providerName,
-							][0]
-						}
-					}
-				}
-			}
-		}
-
-		if len(*in.resource | {}) > 0 {
-			resource: {
-				for sourceName, blocks in in.resource
+		for blockType in ["resource", "data", "ephemeral"]
+		if in[blockType] != _|_
+		if len(in[blockType]) > 0 {
+			(blockType): {
+				for sourceName, blocks in in[blockType]
 				for blockName, block in blocks {
 					let providerName = [
 						if block.#provider != _|_ {block.#provider},
@@ -439,7 +421,11 @@ _#GenerateProviders: {
 			#env:            in.#env
 		}}
 		let directProviders = {
-			for source in [if in.resource != _|_ {in.resource}, if in.data != _|_ {in.data}]
+			for source in [
+				if in.resource != _|_ {in.resource},
+				if in.data != _|_ {in.data},
+				if in.ephemeral != _|_ {in.ephemeral},
+			]
 			for sourceName, blocks in source
 			for _, block in blocks {
 				let name = [
@@ -491,6 +477,7 @@ _#GenerateProviders: {
 					for source in [
 						if block.bootstrap.resource != _|_ {block.bootstrap.resource},
 						if block.bootstrap.data != _|_ {block.bootstrap.data},
+						if block.bootstrap.ephemeral != _|_ {block.bootstrap.ephemeral},
 					]
 					for sourceName, blocks in source
 					for _, bootstrapBlock in blocks {
@@ -541,6 +528,7 @@ _#GenerateProviders: {
 					for source in [
 						if block.bootstrap.resource != _|_ {block.bootstrap.resource},
 						if block.bootstrap.data != _|_ {block.bootstrap.data},
+						if block.bootstrap.ephemeral != _|_ {block.bootstrap.ephemeral},
 					]
 					for sourceName, blocks in source
 					for _, bootstrapBlock in blocks {

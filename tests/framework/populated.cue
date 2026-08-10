@@ -15,7 +15,7 @@ cuet.#InfraModule
 }
 
 #Terraform: {
-	requiredVersion: ">= 1.0"
+	requiredVersion: ">= 1.11"
 	backend: local: path: "state.tfstate"
 	providers: {
 		google: {
@@ -24,6 +24,13 @@ cuet.#InfraModule
 				version: ">=6"
 			}
 			default: provider: project: "example"
+		}
+		random: {
+			requiredProvider: {
+				source:  "hashicorp/random"
+				version: "~>3.7"
+			}
+			default: provider: {}
 		}
 		neon: {
 			requiredProvider: {
@@ -37,7 +44,7 @@ cuet.#InfraModule
 					secretId: "neon"
 				}}
 				bootstrap: secret.out
-				provider: api_key: "${data.google_secret_manager_secret_version.neon.secret_data}"
+				provider: api_key: "${ephemeral.google_secret_manager_secret_version.neon.secret_data}"
 			}
 			aliases: readonly: provider: api_key: "readonly"
 		}
@@ -108,6 +115,8 @@ infra: {
 		data: kubernetes_service_v1: example: {
 			#providerAlias: "dev"
 		}
+		data: google_project: framework: {}
+		ephemeral: random_password: framework: length: 32
 	}
 	in: prod: {
 		#history: ["old/module:prod"]
@@ -151,20 +160,28 @@ infra: {
 						source:  "hashicorp/kubernetes"
 						version: "~>2.38"
 					}
+					random: {
+						source:  "hashicorp/random"
+						version: "~>3.7"
+					}
 				}
 				provider: {
 					google: [{project: "example"}]
-					neon: [{api_key: "${data.google_secret_manager_secret_version.neon.secret_data}"}]
+					neon: [{api_key: "${ephemeral.google_secret_manager_secret_version.neon.secret_data}"}]
 					kubernetes: [{
 						alias: "dev"
 						host:  "https://dev.example.com"
 					}]
+					random: [{}]
 				}
 				data: kubernetes_service_v1: example: provider: "kubernetes.dev"
-				data: google_secret_manager_secret_version: neon: {
+				data: google_project: framework: {}
+				ephemeral: google_secret_manager_secret_version: neon: {
 					project: "example"
 					secret:  "neon"
+					version: "latest"
 				}
+				ephemeral: random_password: framework: length: 32
 				...
 			}
 			kubernetes: enabled: true
@@ -195,6 +212,7 @@ infra: {
 				}]
 			}
 			data?: _|_
+			ephemeral?: _|_
 			...
 		}
 		prod: terraform: _
