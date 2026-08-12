@@ -9,6 +9,15 @@ import (
 
 #Network: {
 	in: {
+		#import?: {
+			network?: string
+			subnets?: [string]: string
+			privateServiceAccess?: [string]: {
+				address?:    string
+				connection?: string
+			}
+		}
+
 		name: #RFC1035Name
 
 		autoCreateSubnets: bool
@@ -18,6 +27,12 @@ import (
 		routingMode: _ | *"global"
 
 		mtu?: int & >0
+
+		privateServiceAccess: [#RFC1035Name]: {
+			cidr:    net.IPCIDR
+			service: string
+			service: _ | *"servicenetworking.googleapis.com"
+		}
 
 		subnets: [#RFC1035Name]: {
 			region: #Region
@@ -46,6 +61,26 @@ import (
 			}
 		}
 	}
+	let subnetCidrs = [
+		for _, subnet in in.subnets
+		for _, cidr in subnet.cidrs {
+			value:  cidr
+			parsed: net.ParseCIDR(cidr)
+		},
+	]
+	let privateServiceAccessCidrs = [
+		for _, config in in.privateServiceAccess {
+			value:  config.cidr
+			parsed: net.ParseCIDR(config.cidr)
+		},
+	]
+	for privateCidr in privateServiceAccessCidrs
+	for subnetCidr in subnetCidrs {
+		if net.InCIDR(privateCidr.parsed.prefix_addr, subnetCidr.value) ||
+			net.InCIDR(subnetCidr.parsed.prefix_addr, privateCidr.value) {
+			_|_("private service access CIDRs must not overlap subnet CIDRs")
+		}
+	}
 
 	refs: {
 		network: "google_compute_network.\(in.name)"
@@ -64,10 +99,22 @@ import (
 				(region): "google_compute_router_nat.\(data.natName)"
 			}
 		}
+		privateServiceAccess: {
+			for name, _ in in.privateServiceAccess {
+				(name): {
+					address:    "google_compute_global_address.\(name)"
+					connection: "google_service_networking_connection.\(name)"
+				}
+			}
+		}
 	}
 
 	out: {
 		resource: google_compute_network: (in.name): {
+			if in.#import.network != _|_ {
+				#import: in.#import.network
+			}
+
 			name:                    in.name
 			auto_create_subnetworks: in.autoCreateSubnets
 
@@ -80,6 +127,10 @@ import (
 
 		for subnetName, subnet in in.subnets {
 			resource: google_compute_subnetwork: (subnetName): {
+				if in.#import.subnets[subnetName] != _|_ {
+					#import: in.#import.subnets[subnetName]
+				}
+
 				name: subnetName
 
 				network: "${\(refs.network).id}"
@@ -96,6 +147,32 @@ import (
 						ip_cidr_range: cidr
 					},
 				]
+			}
+		}
+
+		for name, config in in.privateServiceAccess {
+			let cidr = net.ParseCIDR(config.cidr)
+			resource: google_compute_global_address: (name): {
+				if in.#import.privateServiceAccess[name].address != _|_ {
+					#import: in.#import.privateServiceAccess[name].address
+				}
+
+				"name":        name
+				purpose:       "VPC_PEERING"
+				address_type:  "INTERNAL"
+				address:       cidr.prefix_addr
+				prefix_length: cidr.prefix_len
+				network:       "${\(refs.network).id}"
+			}
+
+			resource: google_service_networking_connection: (name): {
+				if in.#import.privateServiceAccess[name].connection != _|_ {
+					#import: in.#import.privateServiceAccess[name].connection
+				}
+
+				network: "${\(refs.network).id}"
+				service: config.service
+				reserved_peering_ranges: ["${\(refs.privateServiceAccess[name].address).name}"]
 			}
 		}
 
