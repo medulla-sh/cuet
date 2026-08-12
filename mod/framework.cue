@@ -113,13 +113,14 @@ _#DefaultProviderAlias: ""
 //             (neon.#Project & {in: name: "my-dev-db"}).out
 //         }
 //         prod: {
-//             (google.#Postgres & {in: {
+//             (google.#CloudSqlInstance & {in: {
 //                 name: "my-prod-db"
 //                 region: "us-west1"
-//                 databaseVersion: "POSTGRES_18"
-//                 settings: {
-//                     tier: "db-f1-micro"
+//                 engine: {
+//                     type:    "postgres"
+//                     version: 18
 //                 }
+//                 tier: "db-f1-micro"
 //             }}).out
 //         }
 //     }

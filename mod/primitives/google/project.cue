@@ -25,6 +25,7 @@ import (
 	"run.googleapis.com" |
 	"secretmanager.googleapis.com" |
 	"servicenetworking.googleapis.com" |
+	"sqladmin.googleapis.com" |
 	"sts.googleapis.com" |
 	"telemetry.googleapis.com" |
 	"trafficdirector.googleapis.com"
