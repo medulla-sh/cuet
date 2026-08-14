@@ -56,6 +56,14 @@ import (
 
 // #AccountToken creates an account-owned Cloudflare API token.
 // The provider credential must have Account API Tokens Read and Write.
+#AccountTokenPolicy: {
+	effect: "allow" | "deny"
+	effect: _ | *"allow"
+	permissionGroups: [...string]
+	permissionGroups: [_, ...]
+	resources: [string]: string
+}
+
 #AccountToken: {
 	in: {
 		#import?: string
@@ -63,18 +71,8 @@ import (
 		name:      string
 		accountId: string
 
-		policies: [
-			{
-				effect: "allow" | "deny"
-				permissionGroups: [string, ...string]
-				resources: [string]: string
-			},
-			...{
-				effect: "allow" | "deny"
-				permissionGroups: [string, ...string]
-				resources: [string]: string
-			},
-		]
+		policies: [...#AccountTokenPolicy]
+		policies: [_, ...]
 	}
 
 	ref: "cloudflare_account_token.\(in.name)"
