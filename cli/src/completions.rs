@@ -111,10 +111,11 @@ impl EnvCompleter for CuetZsh {
         output: &mut dyn Write,
     ) -> std::io::Result<()> {
         let name = name.replace('-', "_");
+        let compdef = bin;
         let bin = shell_quote(bin);
         let completer = shell_quote(completer);
-        let script = r#"#compdef @@BIN@@
-function _clap_dynamic_completer_@@NAME@@() {
+        let script = r#"#compdef @@COMPDEF@@
+function _@@NAME@@() {
     local _CLAP_COMPLETE_INDEX=$(expr $CURRENT - 1)
     local _CLAP_IFS=$'\n'
 
@@ -155,12 +156,16 @@ function _clap_dynamic_completer_@@NAME@@() {
     fi
 }
 
-compdef _clap_dynamic_completer_@@NAME@@ @@BIN@@"#;
+compdef _@@NAME@@ @@BIN@@
+if [[ $funcstack[1] == _@@NAME@@ ]]; then
+    _@@NAME@@
+fi"#;
         write_template(
             output,
             script,
             &[
                 ("BIN", bin.as_str()),
+                ("COMPDEF", compdef),
                 ("NAME", name.as_str()),
                 ("COMPLETER", completer.as_str()),
                 ("MODULE_MARKER", MODULE_MARKER),

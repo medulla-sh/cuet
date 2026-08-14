@@ -58,6 +58,9 @@ fn test_zsh_registration_uses_removable_module_suffix() {
 
     assert_success(&output);
     let registration = String::from_utf8(output.stdout).unwrap();
+    assert!(registration.starts_with("#compdef cuet\n"));
+    assert!(registration.contains("function _cuet()"));
+    assert!(registration.contains("if [[ $funcstack[1] == _cuet ]]"));
     assert!(registration.contains("_describe -V 'modules' modules -S ':' -r ' '"));
 }
 
