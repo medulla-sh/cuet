@@ -27,7 +27,7 @@ cuet.#InfraModule
 		}
 		neon: {
 			requiredProvider: {
-				source:  "kislerdm/neon"
+				source:  "registry.opentofu.org/kislerdm/neon"
 				version: "~>0.13"
 			}
 			default: {
@@ -41,6 +41,23 @@ cuet.#InfraModule
 			}
 			aliases: readonly: provider: api_key: "readonly"
 		}
+		kubernetes: {
+			requiredProvider: {
+				source:  "hashicorp/kubernetes"
+				version: "~>2.38"
+			}
+			aliases: {
+				dev: provider: host:      "https://dev.example.com"
+				internal: provider: host: "https://internal.example.com"
+			}
+		}
+		archive: {
+			requiredProvider: {
+				source:  "example/archive"
+				version: "1.0.0"
+			}
+			aliases: historical: provider: endpoint: "https://archive.example.com"
+		}
 	}
 }
 
@@ -50,7 +67,15 @@ infra: {
 		localBackendOverride: null
 		reconciliation: {
 			environment: "old"
-			requiredProviders: ["neon", "neon"]
+			requiredProviders: [{
+				source: "kislerdm/neon"
+				alias:  "readonly"
+			}, {
+				source: "example/archive"
+				alias:  "historical"
+			}, {
+				source: "terraform.io/builtin/terraform"
+			}]
 		}
 	}
 	in: dev: {
@@ -79,6 +104,9 @@ infra: {
 				}, "local_name"]
 				input: "moved"
 			}
+		}
+		data: kubernetes_service_v1: example: {
+			#providerAlias: "dev"
 		}
 	}
 	in: prod: {
@@ -116,11 +144,23 @@ infra: {
 						version: ">=6"
 					}
 					neon: {
-						source:  "kislerdm/neon"
+						source:  "registry.opentofu.org/kislerdm/neon"
 						version: "~>0.13"
 					}
+					kubernetes: {
+						source:  "hashicorp/kubernetes"
+						version: "~>2.38"
+					}
 				}
-				provider: google: [{project: "example"}]
+				provider: {
+					google: [{project: "example"}]
+					neon: [{api_key: "${data.google_secret_manager_secret_version.neon.secret_data}"}]
+					kubernetes: [{
+						alias: "dev"
+						host:  "https://dev.example.com"
+					}]
+				}
+				data: kubernetes_service_v1: example: provider: "kubernetes.dev"
 				data: google_secret_manager_secret_version: neon: {
 					project: "example"
 					secret:  "neon"
@@ -131,26 +171,30 @@ infra: {
 		}
 		old: terraform: {
 			terraform: required_providers: {
-				google: {
-					source:  "hashicorp/google"
-					version: ">=6"
+				google?:     _|_
+				kubernetes?: _|_
+				archive: {
+					source:  "example/archive"
+					version: "1.0.0"
 				}
 				neon: {
-					source:  "kislerdm/neon"
+					source:  "registry.opentofu.org/kislerdm/neon"
 					version: "~>0.13"
 				}
 			}
 			provider: {
-				google: [{project: "example"}]
-				neon: [{api_key: "${data.google_secret_manager_secret_version.neon.secret_data}"}, {
+				google?:     _|_
+				kubernetes?: _|_
+				archive: [{
+					alias:    "historical"
+					endpoint: "https://archive.example.com"
+				}]
+				neon: [{
 					alias:   "readonly"
 					api_key: "readonly"
 				}]
 			}
-			data: google_secret_manager_secret_version: neon: {
-				project: "example"
-				secret:  "neon"
-			}
+			data?: _|_
 			...
 		}
 		prod: terraform: _

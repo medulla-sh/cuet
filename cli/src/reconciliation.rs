@@ -3,7 +3,7 @@ use crate::logger::Logger;
 use crate::terraform::{INIT_STATE_FILE, capture_in, read_timeout};
 use crate::workspace::Workspace;
 use miette::{IntoDiagnostic, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
@@ -12,7 +12,13 @@ use std::time::Duration;
 #[serde(rename_all = "camelCase")]
 pub struct Reconciliation<'a> {
     pub environment: &'a str,
-    pub required_providers: Vec<String>,
+    pub required_providers: Vec<HistoricalProvider>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct HistoricalProvider {
+    pub source: String,
+    pub alias: String,
 }
 
 pub fn environment_names(workspace: &Workspace) -> Result<BTreeSet<Env>> {
@@ -106,14 +112,22 @@ pub fn remove_local(workspace: &Workspace, environment: &str) -> Result<()> {
 
 struct EnvironmentState {
     has_state: bool,
-    providers: BTreeSet<String>,
+    providers: BTreeSet<HistoricalProvider>,
 }
 
-enum AddressSegment {
-    PrefixOrResource,
-    ModuleName,
-    ResourceAfterData,
-    Done,
+#[derive(Deserialize)]
+struct PulledState {
+    #[serde(rename = "version")]
+    _version: u64,
+    #[serde(default)]
+    resources: Vec<StateResource>,
+    #[serde(default)]
+    outputs: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct StateResource {
+    provider: String,
 }
 
 fn inspect_state(
@@ -123,9 +137,9 @@ fn inspect_state(
     environment: &str,
     timeout: Option<Duration>,
 ) -> Result<EnvironmentState> {
-    let resources = capture_in(logger, tf_bin, directory, &["state", "list"], timeout)?;
-    if !resources.status.success() {
-        let stderr = String::from_utf8_lossy(&resources.stderr);
+    let state = capture_in(logger, tf_bin, directory, &["state", "pull"], timeout)?;
+    if !state.status.success() {
+        let stderr = String::from_utf8_lossy(&state.stderr);
         if state_missing(&stderr) {
             return Ok(EnvironmentState {
                 has_state: false,
@@ -133,127 +147,63 @@ fn inspect_state(
             });
         }
         return Err(miette::miette!(
-            "Failed to list state for environment '{environment}' ({}): {}",
-            resources.status,
+            "Failed to inspect state for environment '{environment}' ({}): {}",
+            state.status,
             stderr.trim()
         ));
     }
 
-    let resource_addresses = String::from_utf8(resources.stdout)
+    let state: PulledState = serde_json::from_slice(&state.stdout)
         .into_diagnostic()
         .map_err(|error| {
-            miette::miette!(
-                "OpenTofu returned invalid state addresses for '{environment}': {error}"
-            )
+            miette::miette!("OpenTofu returned invalid state for '{environment}': {error}")
         })?;
-    let providers: BTreeSet<String> = resource_addresses
-        .lines()
-        .filter(|address| !address.trim().is_empty())
-        .map(provider_name)
-        .collect::<Result<BTreeSet<_>>>()?
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
-    if !providers.is_empty() {
-        return Ok(EnvironmentState {
-            has_state: true,
-            providers,
-        });
-    }
-
-    let outputs = capture_in(logger, tf_bin, directory, &["output", "-json"], timeout)?;
-    if !outputs.status.success() {
-        let stderr = String::from_utf8_lossy(&outputs.stderr);
-        if state_missing(&stderr) {
-            return Ok(EnvironmentState {
-                has_state: false,
-                providers,
-            });
-        }
-        return Err(miette::miette!(
-            "Failed to inspect outputs for environment '{environment}' ({}): {}",
-            outputs.status,
-            stderr.trim()
-        ));
-    }
-    let outputs: serde_json::Map<String, serde_json::Value> =
-        serde_json::from_slice(&outputs.stdout)
-            .into_diagnostic()
-            .map_err(|error| {
-                miette::miette!(
-                    "OpenTofu returned invalid output data for environment '{environment}': {error}"
-                )
-            })?;
+    let providers = state
+        .resources
+        .iter()
+        .map(historical_provider)
+        .collect::<Result<_>>()?;
     Ok(EnvironmentState {
-        has_state: !outputs.is_empty(),
+        has_state: !state.resources.is_empty() || !state.outputs.is_empty(),
         providers,
     })
 }
 
-fn provider_name(address: &str) -> Result<&str> {
-    let resource_type = resource_type(address)?;
-    let (provider, _) = resource_type.split_once('_').ok_or_else(|| {
-        miette::miette!(
-            "Cannot infer a provider from resource type '{resource_type}' in state address '{address}'"
-        )
-    })?;
-    Ok(provider)
-}
-
-fn resource_type(address: &str) -> Result<&str> {
-    let mut state = AddressSegment::PrefixOrResource;
-    let mut resource_type = None;
-    let mut start = 0;
-    let mut bracket_depth = 0;
-    let mut quoted = false;
-    let mut escaped = false;
-    for (index, character) in address.char_indices() {
-        if quoted {
-            if escaped {
-                escaped = false;
-            } else if character == '\\' {
-                escaped = true;
-            } else if character == '"' {
-                quoted = false;
-            }
-            continue;
-        }
-        match character {
-            '"' if bracket_depth > 0 => quoted = true,
-            '[' => bracket_depth += 1,
-            ']' if bracket_depth > 0 => bracket_depth -= 1,
-            '.' if bracket_depth == 0 => {
-                consume_address_segment(&address[start..index], &mut state, &mut resource_type);
-                start = index + 1;
-            }
-            _ => {}
-        }
-    }
-    if quoted || bracket_depth != 0 {
+fn historical_provider(resource: &StateResource) -> Result<HistoricalProvider> {
+    if resource.provider.starts_with("module.") {
         return Err(miette::miette!(
-            "OpenTofu returned invalid resource address '{address}'"
+            "OpenTofu state contains an unsupported module-scoped provider configuration"
         ));
     }
-    consume_address_segment(&address[start..], &mut state, &mut resource_type);
-    resource_type
-        .ok_or_else(|| miette::miette!("OpenTofu returned invalid resource address '{address}'"))
-}
-
-fn consume_address_segment<'a>(
-    segment: &'a str,
-    state: &mut AddressSegment,
-    resource_type: &mut Option<&'a str>,
-) {
-    *state = match state {
-        AddressSegment::PrefixOrResource if segment == "module" => AddressSegment::ModuleName,
-        AddressSegment::PrefixOrResource if segment == "data" => AddressSegment::ResourceAfterData,
-        AddressSegment::PrefixOrResource | AddressSegment::ResourceAfterData => {
-            *resource_type = Some(segment);
-            AddressSegment::Done
-        }
-        AddressSegment::ModuleName => AddressSegment::PrefixOrResource,
-        AddressSegment::Done => AddressSegment::Done,
+    let address = resource
+        .provider
+        .strip_prefix("provider[\"")
+        .ok_or_else(|| miette::miette!("OpenTofu returned invalid provider address"))?;
+    let (source, suffix) = address
+        .split_once("\"]")
+        .ok_or_else(|| miette::miette!("OpenTofu returned invalid provider address"))?;
+    let source = source
+        .strip_prefix("registry.opentofu.org/")
+        .or_else(|| source.strip_prefix("registry.terraform.io/"))
+        .unwrap_or(source);
+    let source_parts = source.split('/').collect::<Vec<_>>();
+    if source != "terraform.io/builtin/terraform"
+        && (!matches!(source_parts.len(), 2 | 3) || source_parts.iter().any(|part| part.is_empty()))
+    {
+        return Err(miette::miette!("OpenTofu returned invalid provider source"));
+    }
+    let alias = if suffix.is_empty() {
+        ""
+    } else {
+        suffix
+            .strip_prefix('.')
+            .filter(|alias| !alias.is_empty() && !alias.contains(['.', '[', ']', '"']))
+            .ok_or_else(|| miette::miette!("OpenTofu returned invalid provider alias"))?
     };
+    Ok(HistoricalProvider {
+        source: source.to_owned(),
+        alias: alias.to_owned(),
+    })
 }
 
 fn state_missing(stderr: &str) -> bool {
@@ -262,7 +212,10 @@ fn state_missing(stderr: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{environment_names, inspect, provider_name, remove_if_empty};
+    use super::{
+        HistoricalProvider, StateResource, environment_names, historical_provider, inspect,
+        remove_if_empty,
+    };
     use crate::logger::Logger;
     use crate::test_directory::TestDirectory;
     use crate::workspace::Workspace;
@@ -280,30 +233,70 @@ mod tests {
     }
 
     #[test]
-    fn test_provider_name_reads_root_resource() -> Result<()> {
-        assert_eq!(provider_name("neon_project.example")?, "neon");
+    fn test_historical_provider_reads_source_and_alias() -> Result<()> {
         assert_eq!(
-            provider_name("data.google_secret_manager_secret_version.neon")?,
-            "google"
+            historical_provider(&StateResource {
+                provider: r#"provider["registry.opentofu.org/kislerdm/neon"]"#.to_owned(),
+            })?,
+            HistoricalProvider {
+                source: "kislerdm/neon".to_owned(),
+                alias: String::new(),
+            }
+        );
+        assert_eq!(
+            historical_provider(&StateResource {
+                provider: r#"provider["registry.terraform.io/hashicorp/google-beta"].bootstrap"#
+                    .to_owned(),
+            })?,
+            HistoricalProvider {
+                source: "hashicorp/google-beta".to_owned(),
+                alias: "bootstrap".to_owned(),
+            }
+        );
+        assert_eq!(
+            historical_provider(&StateResource {
+                provider: r#"provider["providers.example.com/acme/cloud"]"#.to_owned(),
+            })?,
+            HistoricalProvider {
+                source: "providers.example.com/acme/cloud".to_owned(),
+                alias: String::new(),
+            }
+        );
+        assert_eq!(
+            historical_provider(&StateResource {
+                provider: r#"provider["terraform.io/builtin/terraform"]"#.to_owned(),
+            })?,
+            HistoricalProvider {
+                source: "terraform.io/builtin/terraform".to_owned(),
+                alias: String::new(),
+            }
         );
         Ok(())
     }
 
     #[test]
-    fn test_provider_name_reads_indexed_module_resource() -> Result<()> {
-        assert_eq!(
-            provider_name(r#"module.regions["us.west"].module.database.neon_project.example[0]"#)?,
-            "neon"
+    fn test_historical_provider_rejects_invalid_source() {
+        assert!(
+            historical_provider(&StateResource {
+                provider: r#"provider["example"]"#.to_owned(),
+            })
+            .is_err()
         );
-        Ok(())
     }
 
     #[test]
-    fn test_provider_name_rejects_resource_without_prefix() {
-        let error = provider_name("example.resource")
-            .expect_err("resource type without provider prefix should fail");
-
-        assert!(error.to_string().contains("Cannot infer a provider"));
+    fn test_historical_provider_rejects_unsupported_configurations() {
+        for provider in [
+            r#"module.database.provider["registry.opentofu.org/hashicorp/google"]"#,
+            r#"provider["registry.opentofu.org/hashicorp/aws"].by_region["eu-west-1"]"#,
+        ] {
+            assert!(
+                historical_provider(&StateResource {
+                    provider: provider.to_owned(),
+                })
+                .is_err()
+            );
+        }
     }
 
     #[test]
@@ -335,21 +328,18 @@ mod tests {
             r#"#!/usr/bin/env bash
 set -euo pipefail
 environment="$(basename "$PWD")"
-if [[ "$*" == "state list" ]]; then
+if [[ "$*" == "state pull" ]]; then
     case "$environment" in
-        legacy) printf '%s\n' 'neon_project.example' 'data.google_secret_manager_secret_version.neon' ;;
-        live) if [[ ! -f removed ]]; then printf '%s\n' 'neon_project.example'; fi ;;
+        legacy) printf '%s' '{"version":4,"resources":[{"type":"neon_project","provider":"provider[\"registry.opentofu.org/kislerdm/neon\"]"},{"type":"google_secret_manager_secret_version","provider":"provider[\"registry.opentofu.org/hashicorp/google\"].bootstrap"}]}' ;;
+        live) if [[ ! -f removed ]]; then printf '%s' '{"version":4,"resources":[{"type":"neon_project","provider":"provider[\"registry.opentofu.org/kislerdm/neon\"]"}]}'; else printf '{"version":4}'; fi ;;
+        outputs) printf '%s' '{"version":4,"outputs":{"host":{"value":"example"}}}' ;;
+        malformed) printf '{}' ;;
+        *) printf '{"version":4}' ;;
     esac
-elif [[ "$*" == "output -json" ]]; then
-    if [[ "$environment" == "outputs" ]]; then
-        printf '{"host":{"value":"example"}}'
-    else
-        printf '{}'
-    fi
 fi
 "#,
         )?;
-        for environment in ["empty", "legacy", "live", "outputs"] {
+        for environment in ["empty", "legacy", "live", "malformed", "outputs"] {
             initialize_environment(&workspace, environment)?;
         }
 
@@ -359,12 +349,28 @@ fi
             inspect(&Logger::new(false), &workspace, &tf_bin, "outputs", None)?
                 .expect("outputs should count as state");
         let empty = inspect(&Logger::new(false), &workspace, &tf_bin, "empty", None)?;
+        let malformed =
+            remove_if_empty(&Logger::new(false), &workspace, &tf_bin, "malformed", None);
 
         assert_eq!(reconciliation.environment, "legacy");
-        assert_eq!(reconciliation.required_providers, ["google", "neon"]);
+        assert_eq!(
+            reconciliation.required_providers,
+            [
+                HistoricalProvider {
+                    source: "hashicorp/google".to_owned(),
+                    alias: "bootstrap".to_owned(),
+                },
+                HistoricalProvider {
+                    source: "kislerdm/neon".to_owned(),
+                    alias: String::new(),
+                },
+            ]
+        );
         assert!(output_reconciliation.required_providers.is_empty());
         assert!(empty.is_none());
+        assert!(malformed.is_err());
         assert!(workspace.target_dir().join(".cuet/empty").is_dir());
+        assert!(workspace.target_dir().join(".cuet/malformed").is_dir());
 
         fs::write(workspace.target_dir().join(".cuet/live/removed"), "").into_diagnostic()?;
         remove_if_empty(&Logger::new(false), &workspace, &tf_bin, "live", None)?;

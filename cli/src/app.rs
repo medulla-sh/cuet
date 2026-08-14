@@ -511,7 +511,7 @@ elif [[ $* == 'state pull' ]]; then
 		printf 'No state file was found!\n' >&2
 		exit 1
 	fi
-	printf '{{"lineage":"test-lineage","serial":1}}'
+	printf '{{"version":4,"lineage":"test-lineage","serial":1}}'
 fi
 "#,
                 tf_marker.display()
@@ -568,11 +568,14 @@ fi
                 r#"#!/usr/bin/env bash
 set -euo pipefail
 case "$*" in
-    "state list")
+    "state pull")
         if [[ $PWD == */unrelated ]]; then exit 99; fi
-        if [[ ! -f '{}' ]]; then printf '%s\n' 'neon_project.example'; fi
+        if [[ ! -f '{}' ]]; then
+            printf '%s' '{{"version":4,"resources":[{{"type":"neon_project","provider":"provider[\"registry.opentofu.org/kislerdm/neon\"].readonly"}}]}}'
+        else
+            printf '{{"version":4}}'
+        fi
         ;;
-    "output -json") printf '{{}}' ;;
     "apply") touch '{}' ;;
 esac
 "#,
@@ -607,7 +610,7 @@ esac
         let expression = fs::read_to_string(cue_expression).into_diagnostic()?;
         assert!(
             expression.contains(
-                r#"reconciliation: {"environment":"global","requiredProviders":["neon"]}"#
+                r#"reconciliation: {"environment":"global","requiredProviders":[{"source":"kislerdm/neon","alias":"readonly"}]}"#
             )
         );
         Ok(())
@@ -639,7 +642,7 @@ printf '[]'
                 r#"#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> '{}'
-if [[ $* == 'output -json' ]]; then printf '{{}}'; fi
+if [[ $* == 'state pull' ]]; then printf '{{"version":4}}'; fi
 "#,
                 invocations.display()
             ),
@@ -668,7 +671,7 @@ if [[ $* == 'output -json' ]]; then printf '{{}}'; fi
         assert!(!environment_dir.exists());
         assert_eq!(
             fs::read_to_string(invocations).into_diagnostic()?,
-            "state list\noutput -json\n"
+            "state pull\n"
         );
         Ok(())
     }

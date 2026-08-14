@@ -556,7 +556,7 @@ mod tests {
     };
     use crate::cli::CueCommand;
     use crate::logger::Logger;
-    use crate::reconciliation::Reconciliation;
+    use crate::reconciliation::{HistoricalProvider, Reconciliation};
     use crate::terraform::{
         CommandTimeout, DEFAULT_READ_TIMEOUT, INIT_STATE_FILE, output, run_with_timeout, timeout,
     };
@@ -609,7 +609,16 @@ mod tests {
         let workspace = temp.workspace()?;
         let reconciliation = Reconciliation {
             environment: "global",
-            required_providers: vec!["google".to_owned(), "neon".to_owned()],
+            required_providers: vec![
+                HistoricalProvider {
+                    source: "hashicorp/google".to_owned(),
+                    alias: String::new(),
+                },
+                HistoricalProvider {
+                    source: "kislerdm/neon".to_owned(),
+                    alias: "readonly".to_owned(),
+                },
+            ],
         };
 
         let expression =
@@ -617,7 +626,7 @@ mod tests {
 
         assert_eq!(
             expression,
-            r#"((infra & { #metadata: { module: "infra/neon", localBackendOverride: null, reconciliation: {"environment":"global","requiredProviders":["google","neon"]} } }).out)["global"].terraform"#
+            r#"((infra & { #metadata: { module: "infra/neon", localBackendOverride: null, reconciliation: {"environment":"global","requiredProviders":[{"source":"hashicorp/google","alias":""},{"source":"kislerdm/neon","alias":"readonly"}]} } }).out)["global"].terraform"#
         );
         Ok(())
     }

@@ -12,13 +12,19 @@ package cuet
 	name:   string
 }
 
+#HistoricalProvider: {
+	source: string
+	alias:  string
+	alias:  _ | *""
+}
+
 #TerraformInput: {
 	#module: string
 	#backendConfigs: [string]: [string]: {...}
 	#backendConfigs: _ | *{}
 	#envName: string
 	#env:     _
-	#historicalProviders: [...string]
+	#historicalProviders: [...#HistoricalProvider]
 	#historicalProviders: _ | *[]
 	#provider?:      string
 	#providerAlias?: string

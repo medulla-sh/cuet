@@ -26,7 +26,7 @@ _#DefaultProviderAlias: ""
 		version: string
 	}
 	// Default provider instance. Used if no alias is specified.
-	default: #ProviderInstance
+	default?: #ProviderInstance
 	// Alternate provider instances keyed by alias.
 	aliases: [string]: #ProviderInstance
 }
@@ -44,7 +44,7 @@ _#DefaultProviderAlias: ""
 	localBackendOverride: _ | *null
 	reconciliation: null | {
 		environment: string
-		requiredProviders: [...string]
+		requiredProviders: [...#HistoricalProvider]
 	}
 	reconciliation: _ | *null
 }
@@ -454,14 +454,25 @@ _#GenerateProviders: {
 			}
 		}
 		let historicalProviders = {
-			for providerName in in.#historicalProviders {
-				(providerName): {
-					(_#DefaultProviderAlias): true
-					if #BuiltinProviders[providerName] == _|_ {
-						for alias, _ in providerRegistry[providerName].aliases {
-							(alias): true
-						}
-					}
+			for provider in in.#historicalProviders {
+				let matches = list.Concat([[
+					for name, registration in providerRegistry
+					let registeredSource = strings.TrimPrefix(strings.TrimPrefix(registration.requiredProvider.source, "registry.opentofu.org/"), "registry.terraform.io/")
+					let historicalSource = strings.TrimPrefix(strings.TrimPrefix(provider.source, "registry.opentofu.org/"), "registry.terraform.io/")
+					if registeredSource == historicalSource
+					if provider.alias == _#DefaultProviderAlias && registration.default != _|_ ||
+						provider.alias != _#DefaultProviderAlias && registration.aliases[provider.alias] != _|_ {
+						name
+					},
+				], [
+					if provider.source == "terraform.io/builtin/terraform"
+					if provider.alias == _#DefaultProviderAlias {"terraform"},
+				]])
+				if len(matches) == 1 {
+					(matches[0]): (provider.alias): true
+				}
+				if len(matches) != 1 {
+					(provider.source): (provider.alias): _|_("historical provider must match exactly one registered provider instance")
 				}
 			}
 		}
