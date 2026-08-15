@@ -1,7 +1,7 @@
 package cloudflare
 
 import (
-	"strings"
+	"encoding/json"
 	T "github.com/medulla-sh/cuet"
 )
 
@@ -61,7 +61,7 @@ import (
 	effect: _ | *"allow"
 	permissionGroups: [...string]
 	permissionGroups: [_, ...]
-	resources: [string]: string
+	resources: [string]: string | {[string]: string}
 }
 
 #AccountToken: {
@@ -90,8 +90,7 @@ import (
 				permission_groups: [for permissionGroup in policy.permissionGroups {
 					id: permissionGroup
 				}]
-				let resourceEntries = [for resource, value in policy.resources {#""\#(resource)" = "\#(value)""#}]
-				resources: #"${jsonencode({\#(strings.Join(resourceEntries, ", "))})}"#
+				resources: json.Marshal(policy.resources)
 			}]
 		}
 	}
