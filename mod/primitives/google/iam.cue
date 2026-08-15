@@ -49,6 +49,31 @@ import (
 	}
 }
 
+#BucketIamMember: {
+	in: {
+		#import?: string
+
+		name:   string
+		bucket: string
+		role:   string
+		member: string
+	}
+
+	ref: "google_storage_bucket_iam_member.\(in.name)"
+
+	out: T.#TerraformInput & {
+		resource: google_storage_bucket_iam_member: (in.name): {
+			if in.#import != _|_ {
+				#import: in.#import
+			}
+
+			bucket: in.bucket
+			role:   in.role
+			member: in.member
+		}
+	}
+}
+
 #ServiceAccountIamMember: {
 	in: {
 		#import?: string
