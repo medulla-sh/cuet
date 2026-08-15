@@ -28,7 +28,7 @@ fn test_completions_command_generates_dynamic_registration() {
 }
 
 #[test]
-fn test_dynamic_completion_suggests_workspace_modules() {
+fn test_dynamic_completion_traverses_workspace_module_folders() {
     let temp = TempDir::new().unwrap();
     fs::write(temp.path().join(".cuetroot.cue"), "").unwrap();
     let module = temp.path().join("infra/neon");
@@ -45,7 +45,25 @@ fn test_dynamic_completion_suggests_workspace_modules() {
         .unwrap();
 
     assert_success(&output);
-    assert_eq!(String::from_utf8(output.stdout).unwrap(), "/infra/neon");
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "/infra/");
+
+    for shell in ["bash", "elvish", "fish", "powershell"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_cuet"))
+            .current_dir(temp.path())
+            .env("COMPLETE", shell)
+            .env_remove("_CLAP_IFS")
+            .env("_CLAP_COMPLETE_INDEX", "2")
+            .args(["--", "cuet", "-t", "/infra/"])
+            .output()
+            .unwrap();
+
+        assert_success(&output);
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim_end(),
+            "/infra/neon:",
+            "unexpected {shell} completion"
+        );
+    }
 }
 
 #[test]
@@ -61,16 +79,43 @@ fn test_zsh_registration_uses_removable_module_suffix() {
     assert!(registration.starts_with("#compdef cuet\n"));
     assert!(registration.contains("function _cuet()"));
     assert!(registration.contains("if [[ $funcstack[1] == _cuet ]]"));
-    assert!(registration.contains("_describe -V 'modules' modules -S ':' -r ' '"));
+    assert!(registration.contains("_describe -V 'modules' branch_modules -S '/' -r '/: '"));
+    assert!(registration.contains("_describe -V 'modules' modules -S ':' -r ': '"));
 }
 
 #[test]
-fn test_zsh_dynamic_completion_marks_workspace_modules() {
+fn test_zsh_dynamic_completion_marks_leaf_modules() {
     let temp = TempDir::new().unwrap();
     fs::write(temp.path().join(".cuetroot.cue"), "").unwrap();
     let module = temp.path().join("infra/neon");
     fs::create_dir_all(&module).unwrap();
     fs::write(module.join("cuet.cue"), "").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cuet"))
+        .current_dir(temp.path())
+        .env("COMPLETE", "zsh")
+        .env_remove("_CLAP_IFS")
+        .env("_CLAP_COMPLETE_INDEX", "2")
+        .args(["--", "cuet", "-t", "/infra/"])
+        .output()
+        .unwrap();
+
+    assert_success(&output);
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "__cuet_target_module__\t/infra/neon"
+    );
+}
+
+#[test]
+fn test_zsh_dynamic_completion_marks_modules_with_descendants() {
+    let temp = TempDir::new().unwrap();
+    fs::write(temp.path().join(".cuetroot.cue"), "").unwrap();
+    let module = temp.path().join("infra");
+    let nested_module = module.join("neon");
+    fs::create_dir_all(&nested_module).unwrap();
+    fs::write(module.join("cuet.cue"), "").unwrap();
+    fs::write(nested_module.join("cuet.cue"), "").unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_cuet"))
         .current_dir(temp.path())
@@ -84,7 +129,7 @@ fn test_zsh_dynamic_completion_marks_workspace_modules() {
     assert_success(&output);
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        "__cuet_target_module__\t/infra/neon"
+        "__cuet_target_branch_module__\t/infra"
     );
 }
 

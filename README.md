@@ -47,12 +47,13 @@ For example, load completions for the current Bash session with:
 source <(cuet completions bash)
 ```
 
-Target completion discovers modules from the current cuet workspace. In Zsh,
-selecting a module adds a temporary `:`: continue typing to complete its
-populated environments, or type a space to remove the `:`. Other shells complete
-the bare module; type `:` before requesting environment completion. Discovery
-failures are ignored, so normal shell completion remains usable outside a
-workspace.
+Target completion discovers modules from the current cuet workspace and
+traverses their paths one folder at a time. In Zsh, folders with descendants add
+a temporary `/`; type `:` to replace it when the folder is also a module, or type
+a space to select that module without an environment. Leaf modules add a
+temporary `:` for completing populated environments. Other shells offer explicit
+`/` and `:` alternatives where both are valid. Discovery failures are ignored,
+so normal shell completion remains usable outside a workspace.
 
 Install the required development tools from the repository `Brewfile`:
 

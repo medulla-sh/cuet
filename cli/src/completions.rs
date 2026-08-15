@@ -7,6 +7,7 @@ use clap_complete::Shell;
 use clap_complete::engine::{CompletionCandidate, complete as complete_args};
 use clap_complete::env::{Bash, Elvish, EnvCompleter, Fish, Powershell, Shells};
 use miette::{IntoDiagnostic, Result};
+use std::collections::{BTreeSet, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::Path;
@@ -14,6 +15,7 @@ use std::process::Command;
 
 const MODULE_TAG: &str = "cuet-target-module";
 const MODULE_MARKER: &str = "__cuet_target_module__";
+const BRANCH_MODULE_MARKER: &str = "__cuet_target_branch_module__";
 
 pub fn complete() {
     let shells: [&dyn EnvCompleter; 5] = [&Bash, &Elvish, &Fish, &Powershell, &CuetZsh];
@@ -53,7 +55,7 @@ pub fn target_candidates(current: &OsStr) -> Vec<CompletionCandidate> {
         .into_iter()
         .map(|value| {
             let candidate = CompletionCandidate::new(value);
-            if completing_module {
+            if completing_module && candidate.get_value().to_string_lossy().ends_with(':') {
                 candidate.tag(Some(MODULE_TAG.into()))
             } else {
                 candidate
@@ -65,17 +67,26 @@ pub fn target_candidates(current: &OsStr) -> Vec<CompletionCandidate> {
 fn target_values(current: &str, current_dir: &Path, cue_bin: &Path) -> Result<Vec<String>> {
     let Some((module, environment_prefix)) = current.split_once(':') else {
         let root = resolve_root(current_dir, None)?;
-        return Ok(discover_modules(&root)?
-            .into_iter()
-            .map(|module| {
-                if module == "." {
-                    module
-                } else {
-                    format!("/{module}")
+        let mut candidates = BTreeSet::new();
+        for module in discover_modules(&root)? {
+            if module == "." {
+                if module.starts_with(current) {
+                    candidates.insert(".:".to_owned());
                 }
-            })
-            .filter(|candidate| module_candidate_matches(candidate, current))
-            .collect());
+                continue;
+            }
+
+            let module = format!("/{module}");
+            let Some(search_from) = module_candidate_search_from(&module, current) else {
+                continue;
+            };
+            if let Some(next_slash) = module[search_from..].find('/') {
+                candidates.insert(module[..=search_from + next_slash].to_owned());
+            } else {
+                candidates.insert(format!("{module}:"));
+            }
+        }
+        return Ok(candidates.into_iter().collect());
     };
 
     let module_target = ModuleTarget::from_cli_component(module);
@@ -89,8 +100,8 @@ fn target_values(current: &str, current_dir: &Path, cue_bin: &Path) -> Result<Ve
     Ok(environments)
 }
 
-// clap_complete cannot represent a removable suffix, so preserve module tags in
-// the Zsh protocol and let Zsh insert `:` separately from the candidate value.
+// clap_complete cannot represent removable suffixes, so preserve module tags in
+// the Zsh protocol and let Zsh choose `/` or `:` based on whether descendants exist.
 struct CuetZsh;
 
 impl EnvCompleter for CuetZsh {
@@ -128,10 +139,15 @@ function _@@NAME@@() {
 
     if [[ -n $completions ]]; then
         local -a dirs=()
+        local -a branch_modules=()
         local -a modules=()
         local -a other=()
         local completion
         for completion in $completions; do
+            if [[ "$completion" == @@BRANCH_MODULE_MARKER@@$'\t'* ]]; then
+                branch_modules+=("${completion#*$'\t'}")
+                continue
+            fi
             if [[ "$completion" == @@MODULE_MARKER@@$'\t'* ]]; then
                 modules+=("${completion#*$'\t'}")
                 continue
@@ -151,7 +167,8 @@ function _@@NAME@@() {
             fi
         done
         [[ -n $dirs ]] && _describe -V 'values' dirs -S '/' -r '/'
-        [[ -n $modules ]] && _describe -V 'modules' modules -S ':' -r ' '
+        [[ -n $branch_modules ]] && _describe -V 'modules' branch_modules -S '/' -r '/: '
+        [[ -n $modules ]] && _describe -V 'modules' modules -S ':' -r ': '
         [[ -n $other ]] && _describe -V 'values' other
     fi
 }
@@ -165,6 +182,7 @@ fi"#;
             script,
             &[
                 ("BIN", bin.as_str()),
+                ("BRANCH_MODULE_MARKER", BRANCH_MODULE_MARKER),
                 ("COMPDEF", compdef),
                 ("NAME", name.as_str()),
                 ("COMPLETER", completer.as_str()),
@@ -193,15 +211,53 @@ fi"#;
 
         let candidates = complete_args(command, args, index, current_dir)?;
         let module_tag = MODULE_TAG.into();
-        for (index, candidate) in candidates.iter().enumerate() {
-            if index != 0 {
+        let branch_paths: HashSet<_> = candidates
+            .iter()
+            .filter_map(|candidate| {
+                candidate
+                    .get_value()
+                    .to_str()
+                    .and_then(|value| value.strip_suffix('/'))
+            })
+            .collect();
+        let module_paths: HashSet<_> = candidates
+            .iter()
+            .filter(|candidate| candidate.get_tag().is_some_and(|tag| tag == &module_tag))
+            .filter_map(|candidate| {
+                candidate
+                    .get_value()
+                    .to_str()
+                    .and_then(|value| value.strip_suffix(':'))
+            })
+            .collect();
+        let mut wrote_candidate = false;
+        for candidate in &candidates {
+            let value = candidate.get_value().to_string_lossy();
+            let module = candidate.get_tag().is_some_and(|tag| tag == &module_tag);
+            if module
+                && value
+                    .strip_suffix(':')
+                    .is_some_and(|path| branch_paths.contains(path))
+            {
+                continue;
+            }
+
+            if wrote_candidate {
                 write!(output, "{separator}")?;
             }
-            if candidate.get_tag().is_some_and(|tag| tag == &module_tag) {
+            wrote_candidate = true;
+
+            if let Some(path) = value.strip_suffix('/')
+                && module_paths.contains(path)
+            {
+                write!(output, "{BRANCH_MODULE_MARKER}\t{path}")?;
+                continue;
+            }
+            if module {
                 write!(
                     output,
                     "{MODULE_MARKER}\t{}",
-                    candidate.get_value().to_string_lossy()
+                    value.strip_suffix(':').unwrap_or(value.as_ref())
                 )?;
                 continue;
             }
@@ -257,12 +313,17 @@ fn escape_zsh_value(value: &str) -> String {
     value.replace('\\', "\\\\").replace(':', "\\:")
 }
 
-fn module_candidate_matches(candidate: &str, current: &str) -> bool {
-    candidate.starts_with(current)
-        || (!current.starts_with('/')
-            && candidate
-                .strip_prefix('/')
-                .is_some_and(|candidate| candidate.starts_with(current)))
+fn module_candidate_search_from(candidate: &str, current: &str) -> Option<usize> {
+    if current.starts_with('/') {
+        candidate
+            .starts_with(current)
+            .then_some(current.len().max(1))
+    } else {
+        candidate
+            .strip_prefix('/')?
+            .starts_with(current)
+            .then_some(current.len() + 1)
+    }
 }
 
 #[cfg(test)]
@@ -287,11 +348,26 @@ mod tests {
 
         let values = target_values("", &root, &temp.path().join("missing-cue"))?;
 
-        assert_eq!(values, [".", "/infra/neon", "/services/api"]);
+        assert_eq!(values, [".:", "/infra/", "/services/"]);
         assert_eq!(
             target_values("infra/n", &root, &temp.path().join("missing-cue"))?,
-            ["/infra/neon"]
+            ["/infra/neon:"]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_target_values_offer_module_and_descendant_delimiters() -> Result<()> {
+        let temp = TestDirectory::new()?;
+        let root = temp.path().join("workspace");
+        fs::create_dir_all(root.join("infra/neon")).into_diagnostic()?;
+        fs::write(root.join(".cuetroot.cue"), "").into_diagnostic()?;
+        fs::write(root.join("infra/cuet.cue"), "").into_diagnostic()?;
+        fs::write(root.join("infra/neon/cuet.cue"), "").into_diagnostic()?;
+
+        let values = target_values("/infra", &root, &temp.path().join("missing-cue"))?;
+
+        assert_eq!(values, ["/infra/", "/infra:"]);
         Ok(())
     }
 
