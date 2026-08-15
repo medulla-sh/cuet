@@ -21,7 +21,7 @@ import (
 		}
 	}
 
-	let sourceRef = "data.cloudflare_account_api_token_permission_groups.\(in.name)"
+	let sourceRef = "data.cloudflare_account_api_token_permission_groups_list.\(in.name)"
 	let localName = "\(in.name)-account-token-permissions"
 
 	refs: {
@@ -36,13 +36,13 @@ import (
 	}
 
 	out: T.#TerraformInput & {
-		data: cloudflare_account_api_token_permission_groups: (in.name): {
+		data: cloudflare_account_api_token_permission_groups_list: (in.name): {
 			account_id: in.accountId
 		}
 		locals: (localName): #"""
 			${{
 				for entry in flatten([
-					for permission in \#(sourceRef).permission_groups : [
+				for permission in \#(sourceRef).result : [
 						for scope in permission.scopes : {
 							key        = join(":", [permission.name, scope])
 							permission = permission
