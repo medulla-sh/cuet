@@ -8,6 +8,7 @@ use crate::execution::{
 use crate::logger::Logger;
 use crate::migration::MigrationRunner;
 use crate::reconciliation;
+use crate::terraform;
 use crate::workspace::{Workspace, discover_modules, resolve_root};
 use clap::CommandFactory;
 use miette::{IntoDiagnostic, Result};
@@ -189,7 +190,12 @@ fn run_terraform_target(
                 .map(String::as_str),
         )?
     };
-    let reconciliation = reconciliation::inspect(logger, workspace, &tf_bin, env, cli.timeout)?;
+    let command = terraform::subcommand(args).map(|(_, command)| command);
+    let reconciliation = if command == Some("init") && desired_environments.contains(env) {
+        None
+    } else {
+        reconciliation::inspect(logger, workspace, &tf_bin, env, cli.timeout)?
+    };
     if !desired_environments.contains(env) && reconciliation.is_none() {
         reconciliation::remove_local(workspace, env)?;
         return Err(miette::miette!(
@@ -214,10 +220,9 @@ fn run_terraform_target(
         cli.timeout,
     )?
     .into_status();
-    let command = args.iter().find(|argument| !argument.starts_with('-'));
     if status.success()
         && !desired_environments.contains(env)
-        && command.is_some_and(|command| matches!(command.as_str(), "apply" | "destroy"))
+        && command.is_some_and(|command| matches!(command, "apply" | "destroy"))
     {
         reconciliation::remove_if_empty(logger, workspace, &tf_bin, env, cli.timeout)?;
     }
@@ -745,6 +750,79 @@ if [[ $* == 'state pull' ]]; then printf '{{"version":4}}'; fi
         assert_eq!(
             fs::read_to_string(invocations).into_diagnostic()?,
             "state pull\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_terraform_init_runs_when_existing_backend_cannot_be_inspected() -> Result<()> {
+        let temp = TestDirectory::new()?;
+        let root = temp.path().join("workspace");
+        let module = root.join("service");
+        let environment_dir = module.join(".cuet/global");
+        fs::create_dir_all(environment_dir.join(".terraform")).into_diagnostic()?;
+        fs::write(root.join(".cuetroot.cue"), "").into_diagnostic()?;
+        fs::write(module.join("cuet.cue"), "").into_diagnostic()?;
+        fs::write(environment_dir.join(".terraform/terraform.tfstate"), "").into_diagnostic()?;
+
+        let cue_bin = temp.path().join("cue");
+        temp.write_executable(
+            &cue_bin,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+expression=""
+output=""
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -e) expression=$2; shift 2 ;;
+        -o) output=$2; shift 2 ;;
+        *) shift ;;
+    esac
+done
+if [[ $expression == \[* ]]; then
+    printf '["global"]'
+elif [[ -n $output ]]; then
+    printf '{}' > "$output"
+fi
+"#,
+        )?;
+        let tf_bin = temp.path().join("tofu");
+        let invocations = temp.path().join("tofu-invocations");
+        temp.write_executable(
+            &tf_bin,
+            &format!(
+                r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> '{}'
+if [[ $* == 'state pull' ]]; then exit 99; fi
+"#,
+                invocations.display()
+            ),
+        )?;
+        let cli = Cli {
+            verbose: false,
+            target: Some(Target {
+                module: ModuleTarget::WorkspaceRelative(PathBuf::from("service")),
+                environment: Some("global".to_owned()),
+            }),
+            workspace: Some(root),
+            cue_path: Some(cue_bin),
+            tf_path: Some(tf_bin),
+            tfmigrate_path: None,
+            timeout: None,
+            use_local_backend: false,
+            command: Commands::Tf {
+                args: vec!["init".to_owned(), "-reconfigure".to_owned()],
+            },
+        };
+
+        let status = run_from(&cli, temp.path(), &mut Vec::new())?
+            .expect("Terraform command should return a status");
+
+        assert!(status.success());
+        assert_eq!(
+            fs::read_to_string(invocations).into_diagnostic()?,
+            "init -reconfigure\n"
         );
         Ok(())
     }
