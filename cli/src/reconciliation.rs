@@ -152,6 +152,12 @@ fn inspect_state(
             stderr.trim()
         ));
     }
+    if state.stdout.is_empty() {
+        return Ok(EnvironmentState {
+            has_state: false,
+            providers: BTreeSet::new(),
+        });
+    }
 
     let state: PulledState = serde_json::from_slice(&state.stdout)
         .into_diagnostic()
@@ -330,6 +336,7 @@ set -euo pipefail
 environment="$(basename "$PWD")"
 if [[ "$*" == "state pull" ]]; then
     case "$environment" in
+        absent) ;;
         legacy) printf '%s' '{"version":4,"resources":[{"type":"neon_project","provider":"provider[\"registry.opentofu.org/kislerdm/neon\"]"},{"type":"google_secret_manager_secret_version","provider":"provider[\"registry.opentofu.org/hashicorp/google\"].bootstrap"}]}' ;;
         live) if [[ ! -f removed ]]; then printf '%s' '{"version":4,"resources":[{"type":"neon_project","provider":"provider[\"registry.opentofu.org/kislerdm/neon\"]"}]}'; else printf '{"version":4}'; fi ;;
         outputs) printf '%s' '{"version":4,"outputs":{"host":{"value":"example"}}}' ;;
@@ -339,7 +346,7 @@ if [[ "$*" == "state pull" ]]; then
 fi
 "#,
         )?;
-        for environment in ["empty", "legacy", "live", "malformed", "outputs"] {
+        for environment in ["absent", "empty", "legacy", "live", "malformed", "outputs"] {
             initialize_environment(&workspace, environment)?;
         }
 
@@ -348,6 +355,7 @@ fi
         let output_reconciliation =
             inspect(&Logger::new(false), &workspace, &tf_bin, "outputs", None)?
                 .expect("outputs should count as state");
+        let absent = inspect(&Logger::new(false), &workspace, &tf_bin, "absent", None)?;
         let empty = inspect(&Logger::new(false), &workspace, &tf_bin, "empty", None)?;
         let malformed =
             remove_if_empty(&Logger::new(false), &workspace, &tf_bin, "malformed", None);
@@ -367,6 +375,7 @@ fi
             ]
         );
         assert!(output_reconciliation.required_providers.is_empty());
+        assert!(absent.is_none());
         assert!(empty.is_none());
         assert!(malformed.is_err());
         assert!(workspace.target_dir().join(".cuet/empty").is_dir());
