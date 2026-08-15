@@ -13,15 +13,15 @@ import (
 		env?:    string
 	}
 
-	ref: "data.terraform_remote_state.\(out._remoteStateName)"
+	let sourceEnv = *in.env | out.#envName
+	let sourceModule = *in.module | out.#module
+	let remoteStateName = "\(strings.Replace(sourceModule, "/", "-", -1))-\(sourceEnv)"
+	ref: "data.terraform_remote_state.\(remoteStateName)"
 	out: this=T.#TerraformInput & {
-		let sourceEnv = *in.env | this.#envName
-		let sourceModule = *in.module | this.#module
-		_remoteStateName: "\(strings.Replace(sourceModule, "/", "-", -1))-\(sourceEnv)"
 		let backendConfig = this.#backendConfigs[sourceEnv]
 		let backendName = [for k, _ in backendConfig {k}][0]
 
-		data: terraform_remote_state: (_remoteStateName): {
+		data: terraform_remote_state: (remoteStateName): {
 			backend: backendName
 			config: {
 				for k, v in backendConfig[backendName] if k != "prefix" {
@@ -42,14 +42,14 @@ import (
 		key:     string
 	}
 
-	ref: #"${data.terraform_remote_state.\#(out._remoteStateName).outputs["\#(in.key)"]}"#
+	let sourceEnv = *in.env | out.#envName
+	let sourceModule = *in.module | out.#module
+	let remoteStateName = "\(strings.Replace(sourceModule, "/", "-", -1))-\(sourceEnv)"
+	ref: #"${data.terraform_remote_state.\#(remoteStateName).outputs["\#(in.key)"]}"#
 	out: this=T.#TerraformInput & {
-		let sourceEnv = *in.env | this.#envName
-		let sourceModule = *in.module | this.#module
-		_remoteStateName: "\(strings.Replace(sourceModule, "/", "-", -1))-\(sourceEnv)"
 		let backendConfig = this.#backendConfigs[sourceEnv]
 		let backendName = [for k, _ in backendConfig {k}][0]
-		data: terraform_remote_state: (_remoteStateName): {
+		data: terraform_remote_state: (remoteStateName): {
 			backend: backendName
 			config: {
 				for k, v in backendConfig[backendName] if k != "prefix" {
