@@ -100,8 +100,19 @@ cuet modules list
 cuet modules check
 ```
 
-`modules check` validates every populated environment with CUE. It does not
-require OpenTofu or cloud credentials.
+`modules check` uses CUE to concretely export the generated Terraform
+configuration for every populated environment. By default, it does not require
+OpenTofu or cloud credentials. To also fail when an OpenTofu/Terraform plan
+reports unapplied configuration or infrastructure drift, run:
+
+```bash
+cuet modules check --drift
+```
+
+Drift checks require OpenTofu/Terraform, backend access, and any credentials
+needed to refresh providers and remote state. They may initialize generated
+working directories, download providers, and lock state. `--target` cannot be
+used with `modules check` because it always checks the whole workspace.
 
 ```bash
 cuet -t infra/neon:dev tf plan

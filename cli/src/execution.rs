@@ -23,6 +23,20 @@ pub struct TerraformMetadata<'a> {
     pub reconciliation: Option<&'a Reconciliation<'a>>,
 }
 
+pub enum TerraformRunResult {
+    Export(ExitStatus),
+    Init(ExitStatus),
+    Command(ExitStatus),
+}
+
+impl TerraformRunResult {
+    pub fn into_status(self) -> ExitStatus {
+        match self {
+            Self::Export(status) | Self::Init(status) | Self::Command(status) => status,
+        }
+    }
+}
+
 fn metadata_expression(workspace: &Workspace, backend_override_value: &str) -> String {
     metadata_expression_for_module(workspace.module_name(), backend_override_value)
 }
@@ -201,8 +215,10 @@ pub fn run_tf(
             reconciliation: None,
         },
         args,
+        &[],
         timeout,
     )
+    .map(TerraformRunResult::into_status)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -214,8 +230,9 @@ pub fn run_tf_with_metadata(
     tf_bin: &Path,
     metadata: &TerraformMetadata<'_>,
     args: &[String],
+    automatic_init_args: &[&str],
     timeout: Option<Duration>,
-) -> Result<ExitStatus> {
+) -> Result<TerraformRunResult> {
     let (export_status, output_dir) = export_reconciled_terraform(
         logger,
         workspace,
@@ -225,7 +242,7 @@ pub fn run_tf_with_metadata(
         metadata.reconciliation,
     )?;
     if !export_status.success() {
-        return Ok(export_status);
+        return Ok(TerraformRunResult::Export(export_status));
     }
 
     let timeout = terraform::timeout(args, timeout).map(CommandTimeout::new);
@@ -235,11 +252,11 @@ pub fn run_tf_with_metadata(
     {
         let init_status = terraform::run_with_timeout(
             logger,
-            &mut terraform::init_command(tf_bin, &output_dir, &args[..index])?,
+            &mut terraform::init_command(tf_bin, &output_dir, &args[..index], automatic_init_args)?,
             timeout,
         )?;
         if !init_status.success() {
-            return Ok(init_status);
+            return Ok(TerraformRunResult::Init(init_status));
         }
     }
 
@@ -248,6 +265,7 @@ pub fn run_tf_with_metadata(
         &mut terraform::command(tf_bin, &output_dir, args),
         timeout,
     )
+    .map(TerraformRunResult::Command)
 }
 
 fn export_reconciled_terraform(

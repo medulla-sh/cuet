@@ -2,7 +2,8 @@ use crate::cli::{Cli, Commands, CueCommand, MigrationCommand, ModulesCommand};
 use crate::completions;
 use crate::environment;
 use crate::execution::{
-    TerraformMetadata, check_cue_export, resolve_tool, run_cue, run_tf_with_metadata,
+    TerraformMetadata, TerraformRunResult, check_cue_export, resolve_tool, run_cue,
+    run_tf_with_metadata,
 };
 use crate::logger::Logger;
 use crate::migration::MigrationRunner;
@@ -45,15 +46,18 @@ fn run_from(
             Ok(None)
         }
         Commands::Modules { command } => {
+            if matches!(command, ModulesCommand::Check { .. }) && cli.target.is_some() {
+                return Err(miette::miette!(
+                    "--target cannot be used with `cuet modules check`; the command checks every populated environment in the workspace"
+                ));
+            }
+            if matches!(command, ModulesCommand::Check { drift: true }) && cli.use_local_backend {
+                return Err(miette::miette!(
+                    "--drift cannot be used with --use-local-backend; drift checks must plan against the configured backend"
+                ));
+            }
             let root = resolve_root(current_dir, cli.workspace.as_deref())?;
-            run_modules(
-                command,
-                &root,
-                cli.cue_path.as_deref(),
-                cli.use_local_backend,
-                cli.verbose,
-                output,
-            )?;
+            run_modules(command, &root, cli, output)?;
             Ok(None)
         }
         Commands::Cue { command } => {
@@ -206,8 +210,10 @@ fn run_terraform_target(
         &tf_bin,
         &metadata,
         args,
+        &[],
         cli.timeout,
-    )?;
+    )?
+    .into_status();
     let command = args.iter().find(|argument| !argument.starts_with('-'));
     if status.success()
         && !desired_environments.contains(env)
@@ -254,9 +260,7 @@ fn log_target_configuration(
 fn run_modules(
     command: &ModulesCommand,
     root: &std::path::Path,
-    cue_path: Option<&std::path::Path>,
-    use_local_backend: bool,
-    verbose: bool,
+    cli: &Cli,
     output: &mut impl Write,
 ) -> Result<()> {
     match command {
@@ -266,29 +270,46 @@ fn run_modules(
             }
             Ok(())
         }
-        ModulesCommand::Check => {
-            let cue_bin =
-                resolve_tool(cue_path.unwrap_or_else(|| std::path::Path::new(DEFAULT_CUE_BIN)))?;
-            let backend_override_value = if use_local_backend {
+        ModulesCommand::Check { drift } => {
+            let cue_bin = resolve_tool(
+                cli.cue_path
+                    .as_deref()
+                    .unwrap_or_else(|| std::path::Path::new(DEFAULT_CUE_BIN)),
+            )?;
+            let tf_bin = drift
+                .then(|| {
+                    resolve_tool(
+                        cli.tf_path
+                            .as_deref()
+                            .unwrap_or_else(|| std::path::Path::new(DEFAULT_TF_BIN)),
+                    )
+                })
+                .transpose()?;
+            let backend_override_value = if cli.use_local_backend {
                 LOCAL_BACKEND_OVERRIDE_VALUE
             } else {
                 "null"
             };
             check_modules(
-                &Logger::new(verbose),
+                &Logger::new(cli.verbose),
                 root,
                 &cue_bin,
+                tf_bin.as_deref(),
                 backend_override_value,
+                cli.timeout,
             )
         }
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn check_modules(
     logger: &Logger,
     root: &std::path::Path,
     cue_bin: &std::path::Path,
+    tf_bin: Option<&std::path::Path>,
     backend_override_value: &str,
+    timeout: Option<std::time::Duration>,
 ) -> Result<()> {
     let mut failures = Vec::new();
     let workspaces = discover_modules(root)?
@@ -304,6 +325,7 @@ fn check_modules(
         .collect::<Result<Vec<_>>>()?;
     let workers = thread::available_parallelism().map_or(1, usize::from);
     let mut checks = Vec::new();
+    let mut successful_checks = Vec::new();
 
     for chunk in workspaces.chunks(workers) {
         let results = thread::scope(|scope| {
@@ -344,7 +366,7 @@ fn check_modules(
     for (module, _, environment) in &checks {
         info!(logger, "Checking {module}:{environment}");
     }
-    for chunk in checks.chunks(workers) {
+    for (chunk_index, chunk) in checks.chunks(workers).enumerate() {
         let results = thread::scope(|scope| {
             let handles: Vec<_> = chunk
                 .iter()
@@ -364,9 +386,11 @@ fn check_modules(
                 .collect::<Result<Vec<_>>>()
         })?;
 
-        for ((module, _, environment), result) in chunk.iter().zip(results) {
+        for (index, ((module, _, environment), result)) in chunk.iter().zip(results).enumerate() {
             match result {
-                Ok(output) if output.status.success() => {}
+                Ok(output) if output.status.success() => {
+                    successful_checks.push(chunk_index * workers + index);
+                }
                 Ok(output) => {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     let stderr = stderr.trim();
@@ -377,6 +401,55 @@ fn check_modules(
                     };
                     failures.push(format!("{module}:{environment}: {}{detail}", output.status));
                 }
+                Err(error) => failures.push(format!("{module}:{environment}: {error}")),
+            }
+        }
+    }
+
+    if let Some(tf_bin) = tf_bin {
+        let plan_args = [
+            "plan".to_owned(),
+            "-detailed-exitcode".to_owned(),
+            "-input=false".to_owned(),
+        ];
+        for index in successful_checks {
+            let (module, workspace, environment) = &checks[index];
+            info!(logger, "Planning {module}:{environment}");
+            let result = (|| {
+                let reconciliation =
+                    reconciliation::inspect(logger, workspace, tf_bin, environment, timeout)?;
+                let metadata = TerraformMetadata {
+                    backend_override_value,
+                    reconciliation: reconciliation.as_ref(),
+                };
+                run_tf_with_metadata(
+                    logger,
+                    workspace,
+                    environment,
+                    cue_bin,
+                    tf_bin,
+                    &metadata,
+                    &plan_args,
+                    &["-input=false"],
+                    timeout,
+                )
+            })();
+            match result {
+                Ok(TerraformRunResult::Command(status)) if status.success() => {}
+                Ok(TerraformRunResult::Command(status)) if status.code() == Some(2) => {
+                    failures.push(format!(
+                        "{module}:{environment}: OpenTofu/Terraform plan reports changes"
+                    ));
+                }
+                Ok(TerraformRunResult::Command(status)) => failures.push(format!(
+                    "{module}:{environment}: OpenTofu/Terraform plan failed: {status}"
+                )),
+                Ok(TerraformRunResult::Export(status)) => failures.push(format!(
+                    "{module}:{environment}: Terraform configuration export failed: {status}"
+                )),
+                Ok(TerraformRunResult::Init(status)) => failures.push(format!(
+                    "{module}:{environment}: OpenTofu/Terraform initialization failed: {status}"
+                )),
                 Err(error) => failures.push(format!("{module}:{environment}: {error}")),
             }
         }
@@ -994,7 +1067,7 @@ fi
             timeout: None,
             use_local_backend: false,
             command: Commands::Modules {
-                command: ModulesCommand::Check,
+                command: ModulesCommand::Check { drift: false },
             },
         };
 
@@ -1038,12 +1111,193 @@ fi
         let mut cli = modules_cli(&temp)?;
         cli.cue_path = Some(cue_bin);
         cli.command = Commands::Modules {
-            command: ModulesCommand::Check,
+            command: ModulesCommand::Check { drift: false },
         };
 
         let status = run_from(&cli, temp.path(), &mut Vec::new())?;
 
         assert!(status.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_modules_check_rejects_target() -> Result<()> {
+        let temp = TestDirectory::new()?;
+        let mut cli = modules_cli(&temp)?;
+        cli.target = Some(Target {
+            module: ModuleTarget::Relative(PathBuf::from(".")),
+            environment: Some("dev".to_owned()),
+        });
+        for drift in [false, true] {
+            cli.command = Commands::Modules {
+                command: ModulesCommand::Check { drift },
+            };
+
+            let error = run_from(&cli, temp.path(), &mut Vec::new())
+                .expect_err("modules check should reject a target");
+
+            assert!(error.to_string().contains("--target cannot be used"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_modules_check_drift_rejects_local_backend() -> Result<()> {
+        let temp = TestDirectory::new()?;
+        let mut cli = modules_cli(&temp)?;
+        cli.use_local_backend = true;
+        cli.command = Commands::Modules {
+            command: ModulesCommand::Check { drift: true },
+        };
+
+        let error = run_from(&cli, temp.path(), &mut Vec::new())
+            .expect_err("drift checks should reject a local backend");
+
+        assert!(error.to_string().contains("--drift cannot be used"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_modules_check_drift_aggregates_plan_changes_and_failures() -> Result<()> {
+        let temp = TestDirectory::new()?;
+        let root = temp.path().join("workspace");
+        fs::create_dir(&root).into_diagnostic()?;
+        fs::write(root.join(".cuetroot.cue"), "").into_diagnostic()?;
+        for module in ["alpha", "beta", "gamma"] {
+            let directory = root.join(module);
+            fs::create_dir(&directory).into_diagnostic()?;
+            fs::write(directory.join("cuet.cue"), "").into_diagnostic()?;
+        }
+        let cue_bin = temp.path().join("cue");
+        temp.write_executable(
+            &cue_bin,
+            r#"#!/usr/bin/env bash
+# Fake CUE discovers one environment and writes requested Terraform exports.
+set -euo pipefail
+expression=""
+output=""
+while [[ $# -gt 0 ]]; do
+	case $1 in
+	-e) expression=$2; shift 2 ;;
+	-o) output=$2; shift 2 ;;
+	*) shift ;;
+	esac
+done
+if [[ $expression == *'["in"]'* ]]; then
+	printf '["dev"]'
+	exit 0
+fi
+if [[ -n $output ]]; then
+	printf '{}' > "$output"
+fi
+"#,
+        )?;
+        let tf_bin = temp.path().join("tofu");
+        let marker = temp.path().join("tofu-invocations");
+        temp.write_executable(
+            &tf_bin,
+            &format!(
+                r#"#!/usr/bin/env bash
+# Fake OpenTofu records commands and gives each module a distinct plan result.
+set -euo pipefail
+module=$(basename "$(dirname "$(dirname "$PWD")")")
+printf '%s:%s\n' "$module" "$*" >> '{}'
+if [[ $1 == init ]]; then
+	exit 0
+fi
+case $module in
+alpha) exit 0 ;;
+beta) exit 2 ;;
+gamma) exit 9 ;;
+esac
+"#,
+                marker.display()
+            ),
+        )?;
+        let cli = Cli {
+            verbose: false,
+            target: None,
+            workspace: Some(root),
+            cue_path: Some(cue_bin),
+            tf_path: Some(tf_bin),
+            tfmigrate_path: Some(temp.path().join("missing-tfmigrate")),
+            timeout: None,
+            use_local_backend: false,
+            command: Commands::Modules {
+                command: ModulesCommand::Check { drift: true },
+            },
+        };
+
+        let error = run_from(&cli, temp.path(), &mut Vec::new())
+            .expect_err("changed and failed plans should fail the check");
+
+        let message = error.to_string();
+        assert!(message.contains("beta:dev: OpenTofu/Terraform plan reports changes"));
+        assert!(message.contains("gamma:dev: OpenTofu/Terraform plan failed: exit status: 9"));
+        let invocations = fs::read_to_string(marker).into_diagnostic()?;
+        for module in ["alpha", "beta", "gamma"] {
+            assert!(invocations.contains(&format!("{module}:init -input=false")));
+            assert!(
+                invocations.contains(&format!("{module}:plan -detailed-exitcode -input=false"))
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_modules_check_drift_does_not_treat_cue_exit_two_as_plan_changes() -> Result<()> {
+        let temp = TestDirectory::new()?;
+        let cue_bin = temp.path().join("cue");
+        temp.write_executable(
+            &cue_bin,
+            r#"#!/usr/bin/env bash
+# Fake CUE accepts checks but fails file exports with the plan-changes exit code.
+set -euo pipefail
+expression=""
+output=""
+while [[ $# -gt 0 ]]; do
+	case $1 in
+	-e) expression=$2; shift 2 ;;
+	-o) output=$2; shift 2 ;;
+	*) shift ;;
+	esac
+done
+if [[ $expression == *'["in"]'* ]]; then
+	printf '["dev"]'
+	exit 0
+fi
+if [[ -n $output ]]; then
+	exit 2
+fi
+"#,
+        )?;
+        let tf_bin = temp.path().join("tofu");
+        let marker = temp.path().join("tofu-ran");
+        temp.write_executable(
+            &tf_bin,
+            &format!(
+                r"#!/usr/bin/env bash
+# Fake OpenTofu records unexpected execution.
+set -euo pipefail
+touch '{}'
+",
+                marker.display()
+            ),
+        )?;
+        let mut cli = modules_cli(&temp)?;
+        cli.cue_path = Some(cue_bin);
+        cli.tf_path = Some(tf_bin);
+        cli.command = Commands::Modules {
+            command: ModulesCommand::Check { drift: true },
+        };
+
+        let error = run_from(&cli, temp.path(), &mut Vec::new())
+            .expect_err("the Terraform configuration export should fail");
+
+        let message = error.to_string();
+        assert!(message.contains("Terraform configuration export failed: exit status: 2"));
+        assert!(!message.contains("plan reports changes"));
+        assert!(!marker.exists());
         Ok(())
     }
 

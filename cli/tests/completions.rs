@@ -155,6 +155,21 @@ fn test_dynamic_completion_suggests_root_flags() {
 }
 
 #[test]
+fn test_dynamic_completion_suggests_modules_check_drift() {
+    let output = Command::new(env!("CARGO_BIN_EXE_cuet"))
+        .env("COMPLETE", "bash")
+        .env_remove("_CLAP_IFS")
+        .env("_CLAP_COMPLETE_INDEX", "3")
+        .args(["--", "cuet", "modules", "check", "--"])
+        .output()
+        .unwrap();
+
+    assert_success(&output);
+    let candidates = String::from_utf8(output.stdout).unwrap();
+    assert!(candidates.lines().any(|candidate| candidate == "--drift"));
+}
+
+#[test]
 fn test_dynamic_completion_suggests_version_command() {
     let output = Command::new(env!("CARGO_BIN_EXE_cuet"))
         .env("COMPLETE", "bash")

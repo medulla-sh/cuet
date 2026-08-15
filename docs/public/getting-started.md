@@ -90,9 +90,24 @@ Validate every populated environment in every module with:
 cuet modules check
 ```
 
-The command reports all invalid module/environment pairs after checking the
-whole workspace. It requires CUE, but does not require OpenTofu or cloud
-credentials.
+The command asks CUE to concretely export the final
+`infra.out[ENV].terraform` value for each populated environment. It reports all
+invalid module/environment pairs after checking the whole workspace. This
+catches CUE evaluation, constraint, incompleteness, and export errors; it does
+not run `cue vet` or OpenTofu/Terraform validation, initialization, or planning.
+
+To also fail when a normal OpenTofu/Terraform plan reports changes, run:
+
+```bash
+cuet modules check --drift
+```
+
+Plan changes include both unapplied configuration and infrastructure changed
+outside Terraform. Drift checks require OpenTofu/Terraform, backend access, and
+any credentials needed to refresh providers and remote state. They may
+initialize generated working directories, download providers, refresh remote
+objects, and lock state. `--target` cannot be used with `modules check` because
+the command always checks every populated environment in the workspace.
 
 ## Useful commands
 

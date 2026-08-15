@@ -48,14 +48,22 @@ where
     process
 }
 
-pub fn init_command(tf_bin: &Path, output_dir: &Path, global_args: &[String]) -> Result<Command> {
+pub fn init_command(
+    tf_bin: &Path,
+    output_dir: &Path,
+    global_args: &[String],
+    additional_args: &[&str],
+) -> Result<Command> {
     // Keep requested command output isolated on stdout while retaining init prompts.
     let stderr = io::stderr()
         .as_fd()
         .try_clone_to_owned()
         .into_diagnostic()?;
     let mut process = command(tf_bin, output_dir, global_args);
-    process.arg("init").stdout(Stdio::from(stderr));
+    process
+        .arg("init")
+        .args(additional_args)
+        .stdout(Stdio::from(stderr));
     Ok(process)
 }
 

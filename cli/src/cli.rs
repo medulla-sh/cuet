@@ -199,8 +199,31 @@ impl MigrationCommand {
 pub enum ModulesCommand {
     /// List modules in the cuet workspace
     List,
-    /// Validate every populated environment in the cuet workspace
-    Check,
+    /// Check CUE exports for every populated module environment
+    ///
+    /// Discovers every module in the workspace and every environment present in its
+    /// evaluated infra.in. For each environment, exports the final
+    /// infra.out[ENV].terraform value with CUE.
+    ///
+    /// Without --drift, this only checks that the generated Terraform configuration
+    /// can be evaluated and concretely exported. It does not run cue vet,
+    /// OpenTofu/Terraform validate, init, or plan, and it does not write generated
+    /// Terraform or state files.
+    ///
+    /// Pass --drift to additionally run an OpenTofu/Terraform plan for every
+    /// populated environment and fail if any plan reports changes. Changes include
+    /// both unapplied configuration and infrastructure changed outside Terraform.
+    /// Drift checks may initialize generated working directories, download
+    /// providers, refresh remote objects, and lock state.
+    ///
+    /// --target is not accepted because this command always checks the whole
+    /// workspace. Failures are collected and reported after all discoverable
+    /// environments have been checked.
+    Check {
+        /// Run a plan for every populated environment and fail if any plan reports changes
+        #[arg(long)]
+        drift: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -360,9 +383,33 @@ mod tests {
         assert!(matches!(
             cli.command,
             Commands::Modules {
-                command: ModulesCommand::Check
+                command: ModulesCommand::Check { drift: false }
             }
         ));
+    }
+
+    #[test]
+    fn test_cli_parses_modules_check_drift() {
+        let cli = Cli::try_parse_from(["cuet", "modules", "check", "--drift"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Commands::Modules {
+                command: ModulesCommand::Check { drift: true }
+            }
+        ));
+    }
+
+    #[test]
+    fn test_cli_explains_modules_check() {
+        let error = Cli::try_parse_from(["cuet", "modules", "check", "--help"]).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::DisplayHelp);
+        let help = error.to_string();
+        assert!(help.contains("exports the final infra.out[ENV].terraform value with CUE"));
+        assert!(help.contains("both unapplied configuration and infrastructure changed"));
+        assert!(help.contains("--target is not accepted"));
+        assert!(help.contains("--drift"));
     }
 
     #[test]
