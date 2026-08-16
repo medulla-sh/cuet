@@ -18,6 +18,26 @@ package google
 		}
 	}
 
+	"push-identity": {
+		input: #PubSubPushIdentity & {in: {
+			name:        "artifact_registry_events"
+			accountId:   "artifact-registry-events"
+			displayName: "Artifact Registry event delivery"
+			project: {
+				name: "internal"
+				id:   "oakmont-internal"
+			}
+		}}
+
+		let iam = input.out.resource.google_service_account_iam_member["artifact_registry_events-token-creator"]
+		assert: input.ref == "google_service_account.artifact_registry_events"
+		assert: iam == {
+			service_account_id: "${google_service_account.artifact_registry_events.name}"
+			role:               "roles/iam.serviceAccountTokenCreator"
+			member:             "${google_project_service_identity.internal_pubsub.member}"
+		}
+	}
+
 	"push-subscription": {
 		input: #PubSubPushSubscription & {in: {
 			name:  "flux-dev"

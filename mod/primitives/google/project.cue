@@ -97,3 +97,30 @@ import (
 		}
 	}
 }
+
+#ProjectServiceIdentity: {
+	in: {
+		name:    string
+		service: #GcpServices
+		project: {
+			name: string
+			id?:  string
+		}
+	}
+
+	ref: "google_project_service_identity.\(in.name)"
+
+	out: T.#TerraformInput & {
+		data: google_project: (in.project.name): {
+			if in.project.id != _|_ {
+				project_id: in.project.id
+			}
+		}
+
+		resource: google_project_service_identity: (in.name): {
+			#provider: "google-beta"
+			project:   "${data.google_project.\(in.project.name).project_id}"
+			"service": in.service
+		}
+	}
+}

@@ -16,6 +16,24 @@ package google
 
 		assert: input.out.resource.google_project_service["internal-connectgateway-googleapis-com"].service == "connectgateway.googleapis.com"
 	}
+
+	"service-identity": {
+		input: #ProjectServiceIdentity & {in: {
+			name:    "internal_pubsub"
+			service: "pubsub.googleapis.com"
+			project: {
+				name: "internal"
+				id:   "oakmont-internal"
+			}
+		}}
+
+		assert: input.out.resource.google_project_service_identity.internal_pubsub.#provider == "google-beta"
+		assert: input.out.resource.google_project_service_identity.internal_pubsub == {
+			#provider: "google-beta"
+			project:   "${data.google_project.internal.project_id}"
+			service:   "pubsub.googleapis.com"
+		}
+	}
 }
 
 projectResult: [for _, test in #ProjectTests {test.assert & true}]

@@ -27,6 +27,46 @@ import T "github.com/medulla-sh/cuet"
 	}
 }
 
+#PubSubPushIdentity: {
+	in: {
+		accountId: string
+
+		name: string
+		name: _ | *accountId
+
+		displayName: string
+		displayName: _ | *accountId
+
+		description?: string
+		project: {
+			name: string
+			id?:  string
+		}
+	}
+
+	let pubsubServiceIdentity = #ProjectServiceIdentity & {"in": {
+		name:    "\(in.project.name)_pubsub"
+		service: "pubsub.googleapis.com"
+		project: in.project
+	}}
+	let pushServiceAccount = #ServiceAccount & {"in": {
+		accountId:   in.accountId
+		name:        in.name
+		displayName: in.displayName
+		if in.description != _|_ {
+			description: in.description
+		}
+		project: in.project
+		iam: "token-creator": {
+			role:   "roles/iam.serviceAccountTokenCreator"
+			member: "${\(pubsubServiceIdentity.ref).member}"
+		}
+	}}
+
+	ref: pushServiceAccount.ref
+	out: pubsubServiceIdentity.out & pushServiceAccount.out
+}
+
 #PubSubPushSubscription: {
 	in: {
 		name:  string
