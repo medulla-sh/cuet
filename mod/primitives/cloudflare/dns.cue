@@ -5,9 +5,21 @@ import (
 	T "github.com/medulla-sh/cuet"
 )
 
+#ZoneCustomFirewallRule: {
+	ref:         string
+	description: string
+	expression:  string
+	action:      "block" | "challenge" | "js-challenge" | "managed-challenge" | "log"
+	enabled:     bool
+	enabled:     _ | *true
+}
+
 #Zone: {
 	in: {
-		#import?: string
+		#imports: {
+			zone?:           string
+			customFirewall?: string
+		}
 
 		name: string
 
@@ -17,20 +29,61 @@ import (
 
 		type: "full" | "partial"
 		type: _ | *"full"
+
+		customFirewallRules: [...#ZoneCustomFirewallRule]
+
+		let customFirewallRuleRefs = {
+			for rule in customFirewallRules {
+				(rule.ref): true
+			}
+		}
+		if len(customFirewallRuleRefs) != len(customFirewallRules) {
+			_|_("custom firewall rule refs must be unique")
+		}
 	}
 
-	ref: "cloudflare_zone.\(in.name)"
+	refs: {
+		zone: "cloudflare_zone.\(in.name)"
+		if len(in.customFirewallRules) > 0 {
+			customFirewall: "cloudflare_ruleset.\(in.name)-custom-firewall"
+		}
+	}
 
 	out: T.#TerraformInput & {
 		resource: cloudflare_zone: (in.name): {
-			if in.#import != _|_ {
-				#import: in.#import
+			if in.#imports.zone != _|_ {
+				#import: in.#imports.zone
 			}
 
 			name: in.zone
 			type: in.type
 
 			account: id: in.accountId
+		}
+
+		if len(in.customFirewallRules) > 0 {
+			resource: cloudflare_ruleset: "\(in.name)-custom-firewall": {
+				if in.#imports.customFirewall != _|_ {
+					#import: in.#imports.customFirewall
+				}
+
+				zone_id:     "${\(refs.zone).id}"
+				name:        "\(in.name)-custom-firewall"
+				description: "Custom firewall rules for \(in.zone)"
+				kind:        "zone"
+				phase:       "http_request_firewall_custom"
+				rules: [for rule in in.customFirewallRules {
+					ref:         rule.ref
+					description: rule.description
+					expression:  rule.expression
+					action: [
+						if rule.action == "js-challenge" {"js_challenge"},
+						if rule.action == "managed-challenge" {"managed_challenge"},
+						if rule.action != "js-challenge" && rule.action != "managed-challenge" {rule.action},
+					][0]
+					enabled: rule.enabled
+				}]
+			}
 		}
 	}
 }

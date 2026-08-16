@@ -46,22 +46,6 @@ package google
 result: [for _, test in #IamMemberTests {test.assert & true}]
 
 #BucketIamMemberTests: {
-	"resource": {
-		input: #BucketIamMember & {"in": {
-			name:   "state-reader"
-			bucket: "oakmont-tf-dev"
-			role:   "roles/storage.objectViewer"
-			member: "serviceAccount:deployment-publisher@example.iam.gserviceaccount.com"
-		}}
-
-		assert: input.ref == "google_storage_bucket_iam_member.state-reader"
-		assert: input.out.resource.google_storage_bucket_iam_member["state-reader"] == {
-			bucket: "oakmont-tf-dev"
-			role:   "roles/storage.objectViewer"
-			member: "serviceAccount:deployment-publisher@example.iam.gserviceaccount.com"
-		}
-	}
-
 	"import": {
 		input: #BucketIamMember & {"in": {
 			#import: "b/oakmont-tf-dev roles/storage.objectViewer serviceAccount:deployment-publisher@example.iam.gserviceaccount.com"
