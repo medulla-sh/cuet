@@ -45,6 +45,7 @@ package google
 				}
 				datapath: defaultSnat: false
 			}
+			access: nodeIPs: "private"
 			deletionProtection: false
 			nodePools: "app-connector": {
 				pod: range:                                              "app-connector-pods"
@@ -69,8 +70,9 @@ package google
 		assert: input.out.resource.google_container_cluster.internal.enable_intranode_visibility == true
 		assert: input.out.resource.google_container_cluster.internal.default_snat_status.disabled == true
 		assert: input.out.resource.google_container_node_pool["app-connector"].network_config == {
-			create_pod_range: false
-			pod_range:        "app-connector-pods"
+			enable_private_nodes: true
+			create_pod_range:     false
+			pod_range:            "app-connector-pods"
 		}
 		assert: input.out.resource.google_container_node_pool["app-connector"].#import == "projects/example/locations/us-west1/clusters/internal/nodePools/app-connector"
 		assert: input.out.resource.google_container_node_pool["app-connector"].autoscaling == {

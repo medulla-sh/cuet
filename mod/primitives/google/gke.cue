@@ -431,8 +431,9 @@ import (
 
 					if nodePool.pod.range != _|_ {
 						network_config: {
-							create_pod_range: false
-							pod_range:        nodePool.pod.range
+							enable_private_nodes: in.access.nodeIPs == "private"
+							create_pod_range:     false
+							pod_range:            nodePool.pod.range
 						}
 					}
 
