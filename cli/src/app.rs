@@ -649,7 +649,7 @@ case "$*" in
     "state pull")
         if [[ $PWD == */unrelated ]]; then exit 99; fi
         if [[ ! -f '{}' ]]; then
-            printf '%s' '{{"version":4,"resources":[{{"type":"neon_project","provider":"provider[\"registry.opentofu.org/kislerdm/neon\"].readonly"}}]}}'
+            printf '%s' '{{"version":4,"resources":[{{"mode":"managed","type":"neon_project","name":"legacy","provider":"provider[\"registry.opentofu.org/kislerdm/neon\"].readonly"}}]}}'
         else
             printf '{{"version":4}}'
         fi
@@ -688,7 +688,7 @@ esac
         let expression = fs::read_to_string(cue_expression).into_diagnostic()?;
         assert!(
             expression.contains(
-                r#"reconciliation: {"environment":"global","requiredProviders":[{"source":"kislerdm/neon","alias":"readonly"}]}"#
+                r#"reconciliation: {"environment":"global","stateResources":[{"address":"neon_project.legacy","source":"kislerdm/neon","alias":"readonly"}]}"#
             )
         );
         Ok(())

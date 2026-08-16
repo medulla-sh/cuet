@@ -74,14 +74,17 @@ infra: {
 		localBackendOverride: null
 		reconciliation: {
 			environment: "old"
-			requiredProviders: [{
-				source: "kislerdm/neon"
-				alias:  "readonly"
+			stateResources: [{
+				address: "neon_project.deleted"
+				source:  "kislerdm/neon"
+				alias:   "readonly"
 			}, {
-				source: "example/archive"
-				alias:  "historical"
+				address: "archive_file.deleted"
+				source:  "example/archive"
+				alias:   "historical"
 			}, {
-				source: "terraform.io/builtin/terraform"
+				address: "terraform_data.deleted"
+				source:  "terraform.io/builtin/terraform"
 			}]
 		}
 	}
@@ -211,7 +214,7 @@ infra: {
 					api_key: "readonly"
 				}]
 			}
-			data?: _|_
+			data?:      _|_
 			ephemeral?: _|_
 			...
 		}

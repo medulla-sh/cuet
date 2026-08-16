@@ -44,7 +44,7 @@ _#DefaultProviderAlias: ""
 	localBackendOverride: _ | *null
 	reconciliation: null | {
 		environment: string
-		requiredProviders: [...#HistoricalProvider]
+		stateResources: [...#HistoricalResource]
 	}
 	reconciliation: _ | *null
 }
@@ -208,9 +208,9 @@ _#DefaultProviderAlias: ""
 			let metadata = infraThis.#metadata
 
 			for e, _ in infraThis["in"] {
-				let historicalProviders = [
+				let historicalResources = [
 					if metadata.reconciliation != null
-					if metadata.reconciliation.environment == e {metadata.reconciliation.requiredProviders},
+					if metadata.reconciliation.environment == e {metadata.reconciliation.stateResources},
 					[],
 				][0]
 				(e): (_#GenerateTf & {
@@ -222,7 +222,7 @@ _#DefaultProviderAlias: ""
 					tf: infraThis["in"][e] & {
 						#module:              metadata.module
 						#backendConfigs:      backendConfigs
-						#historicalProviders: historicalProviders
+						#historicalResources: historicalResources
 					}
 				}).out
 			}
@@ -251,6 +251,9 @@ _#DefaultProviderAlias: ""
 _#GenerateTf: {
 	tfConfig: #TerraformConfig
 	tf:       #TerraformInput
+	let generatedMoves = _#GenerateMoves & {
+		in: tf
+	}
 
 	out: #TerraformOutput & {
 		terraform: required_version: tfConfig.requiredVersion
@@ -264,15 +267,13 @@ _#GenerateTf: {
 		(_#GenerateProviders & {
 			providerRegistry: tfConfig.providers
 			in:               tf
+			moves:            generatedMoves.#moves
 		}).out
 
 		(_#GenerateImports & {
 			in: tf
 		}).out
 
-		let generatedMoves = _#GenerateMoves & {
-			in: tf
-		}
 		generatedMoves.out
 		#crossStateTransitions: generatedMoves.crossStateTransitions
 
@@ -413,6 +414,11 @@ _#ResolveResourceHistory: {
 _#GenerateProviders: {
 	providerRegistry: #ProviderRegistry
 	in:               #TerraformInput
+	moves: [...{
+		from: string
+		to:   string
+	}]
+	moves: _ | *[]
 
 	out: #TerraformOutput & {
 		let bootstrapContext = {bootstrap: {
@@ -440,26 +446,42 @@ _#GenerateProviders: {
 				(name): (alias): true
 			}
 		}
+		let representedResources = list.Concat([[
+			for resourceType, resources in (*in.resource | {})
+			for resourceName, _ in resources {
+				"\(resourceType).\(resourceName)"
+			},
+		], [
+			for resourceType, resources in (*in.data | {})
+			for resourceName, _ in resources {
+				"data.\(resourceType).\(resourceName)"
+			},
+		], [
+			for move in moves {
+				move.from
+			},
+		]])
 		let historicalProviders = {
-			for provider in in.#historicalProviders {
+			for resource in in.#historicalResources
+			if !list.Contains(representedResources, resource.address) {
 				let matches = list.Concat([[
 					for name, registration in providerRegistry
 					let registeredSource = strings.TrimPrefix(strings.TrimPrefix(registration.requiredProvider.source, "registry.opentofu.org/"), "registry.terraform.io/")
-					let historicalSource = strings.TrimPrefix(strings.TrimPrefix(provider.source, "registry.opentofu.org/"), "registry.terraform.io/")
+					let historicalSource = strings.TrimPrefix(strings.TrimPrefix(resource.source, "registry.opentofu.org/"), "registry.terraform.io/")
 					if registeredSource == historicalSource
-					if provider.alias == _#DefaultProviderAlias && registration.default != _|_ ||
-						provider.alias != _#DefaultProviderAlias && registration.aliases[provider.alias] != _|_ {
+					if resource.alias == _#DefaultProviderAlias && registration.default != _|_ ||
+						resource.alias != _#DefaultProviderAlias && registration.aliases[resource.alias] != _|_ {
 						name
 					},
 				], [
-					if provider.source == "terraform.io/builtin/terraform"
-					if provider.alias == _#DefaultProviderAlias {"terraform"},
+					if resource.source == "terraform.io/builtin/terraform"
+					if resource.alias == _#DefaultProviderAlias {"terraform"},
 				]])
 				if len(matches) == 1 {
-					(matches[0]): (provider.alias): true
+					(matches[0]): (resource.alias): true
 				}
 				if len(matches) != 1 {
-					(provider.source): (provider.alias): _|_("historical provider must match exactly one registered provider instance")
+					(resource.source): (resource.alias): _|_("historical provider must match exactly one registered provider instance")
 				}
 			}
 		}
@@ -637,6 +659,7 @@ _#GenerateMoves: {
 			history.sameCurrentStateMoves
 		},
 	])
+	#moves: moves
 
 	crossStateTransitions: list.Concat([
 		for history in histories {

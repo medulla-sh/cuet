@@ -92,3 +92,6 @@ providers: google: {
 ```
 
 Resources can set `#providerAlias` to target a non-default instance.
+
+Provider alias changes are reconciled automatically. Keep an old alias
+configured while removed resources still use it.

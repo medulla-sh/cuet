@@ -574,7 +574,7 @@ mod tests {
     };
     use crate::cli::CueCommand;
     use crate::logger::Logger;
-    use crate::reconciliation::{HistoricalProvider, Reconciliation};
+    use crate::reconciliation::{HistoricalProvider, HistoricalResource, Reconciliation};
     use crate::terraform::{
         CommandTimeout, DEFAULT_READ_TIMEOUT, INIT_STATE_FILE, output, run_with_timeout, timeout,
     };
@@ -622,19 +622,25 @@ mod tests {
     }
 
     #[test]
-    fn test_reconciled_export_expression_injects_historical_providers() -> Result<()> {
+    fn test_reconciled_export_expression_injects_state_resources() -> Result<()> {
         let temp = TestDirectory::new()?;
         let workspace = temp.workspace()?;
         let reconciliation = Reconciliation {
             environment: "global",
-            required_providers: vec![
-                HistoricalProvider {
-                    source: "hashicorp/google".to_owned(),
-                    alias: String::new(),
+            state_resources: vec![
+                HistoricalResource {
+                    address: "google_project.current".to_owned(),
+                    provider: HistoricalProvider {
+                        source: "hashicorp/google".to_owned(),
+                        alias: String::new(),
+                    },
                 },
-                HistoricalProvider {
-                    source: "kislerdm/neon".to_owned(),
-                    alias: "readonly".to_owned(),
+                HistoricalResource {
+                    address: "neon_project.legacy".to_owned(),
+                    provider: HistoricalProvider {
+                        source: "kislerdm/neon".to_owned(),
+                        alias: "readonly".to_owned(),
+                    },
                 },
             ],
         };
@@ -644,7 +650,7 @@ mod tests {
 
         assert_eq!(
             expression,
-            r#"((infra & { #metadata: { module: "infra/neon", localBackendOverride: null, reconciliation: {"environment":"global","requiredProviders":[{"source":"hashicorp/google","alias":""},{"source":"kislerdm/neon","alias":"readonly"}]} } }).out)["global"].terraform"#
+            r#"((infra & { #metadata: { module: "infra/neon", localBackendOverride: null, reconciliation: {"environment":"global","stateResources":[{"address":"google_project.current","source":"hashicorp/google","alias":""},{"address":"neon_project.legacy","source":"kislerdm/neon","alias":"readonly"}]} } }).out)["global"].terraform"#
         );
         Ok(())
     }

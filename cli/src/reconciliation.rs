@@ -12,13 +12,20 @@ use std::time::Duration;
 #[serde(rename_all = "camelCase")]
 pub struct Reconciliation<'a> {
     pub environment: &'a str,
-    pub required_providers: Vec<HistoricalProvider>,
+    pub state_resources: Vec<HistoricalResource>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct HistoricalProvider {
     pub source: String,
     pub alias: String,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct HistoricalResource {
+    pub address: String,
+    #[serde(flatten)]
+    pub provider: HistoricalProvider,
 }
 
 pub fn environment_names(workspace: &Workspace) -> Result<BTreeSet<Env>> {
@@ -78,7 +85,7 @@ pub fn inspect<'a>(
     }
     Ok(Some(Reconciliation {
         environment,
-        required_providers: state.providers.into_iter().collect(),
+        state_resources: state.resources.into_iter().collect(),
     }))
 }
 
@@ -112,7 +119,7 @@ pub fn remove_local(workspace: &Workspace, environment: &str) -> Result<()> {
 
 struct EnvironmentState {
     has_state: bool,
-    providers: BTreeSet<HistoricalProvider>,
+    resources: BTreeSet<HistoricalResource>,
 }
 
 #[derive(Deserialize)]
@@ -126,7 +133,19 @@ struct PulledState {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum StateResourceMode {
+    Managed,
+    Data,
+}
+
+#[derive(Deserialize)]
 struct StateResource {
+    mode: StateResourceMode,
+    #[serde(rename = "type")]
+    resource_type: String,
+    name: String,
+    module: Option<String>,
     provider: String,
 }
 
@@ -143,7 +162,7 @@ fn inspect_state(
         if state_missing(&stderr) {
             return Ok(EnvironmentState {
                 has_state: false,
-                providers: BTreeSet::new(),
+                resources: BTreeSet::new(),
             });
         }
         return Err(miette::miette!(
@@ -155,7 +174,7 @@ fn inspect_state(
     if state.stdout.is_empty() {
         return Ok(EnvironmentState {
             has_state: false,
-            providers: BTreeSet::new(),
+            resources: BTreeSet::new(),
         });
     }
 
@@ -164,14 +183,29 @@ fn inspect_state(
         .map_err(|error| {
             miette::miette!("OpenTofu returned invalid state for '{environment}': {error}")
         })?;
-    let providers = state
+    let resources = state
         .resources
         .iter()
-        .map(historical_provider)
+        .map(historical_resource)
         .collect::<Result<_>>()?;
     Ok(EnvironmentState {
         has_state: !state.resources.is_empty() || !state.outputs.is_empty(),
-        providers,
+        resources,
+    })
+}
+
+fn historical_resource(resource: &StateResource) -> Result<HistoricalResource> {
+    let prefix = resource
+        .module
+        .as_deref()
+        .map_or_else(String::new, |module| format!("{module}."));
+    let mode = match resource.mode {
+        StateResourceMode::Managed => "",
+        StateResourceMode::Data => "data.",
+    };
+    Ok(HistoricalResource {
+        address: format!("{prefix}{mode}{}.{}", resource.resource_type, resource.name),
+        provider: historical_provider(resource)?,
     })
 }
 
@@ -219,8 +253,8 @@ fn state_missing(stderr: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        HistoricalProvider, StateResource, environment_names, historical_provider, inspect,
-        remove_if_empty,
+        HistoricalProvider, HistoricalResource, StateResource, StateResourceMode,
+        environment_names, historical_provider, historical_resource, inspect, remove_if_empty,
     };
     use crate::logger::Logger;
     use crate::test_directory::TestDirectory;
@@ -238,40 +272,49 @@ mod tests {
         Ok(directory)
     }
 
+    fn state_resource(provider: &str) -> StateResource {
+        StateResource {
+            mode: StateResourceMode::Managed,
+            resource_type: "example_resource".to_owned(),
+            name: "example".to_owned(),
+            module: None,
+            provider: provider.to_owned(),
+        }
+    }
+
     #[test]
     fn test_historical_provider_reads_source_and_alias() -> Result<()> {
         assert_eq!(
-            historical_provider(&StateResource {
-                provider: r#"provider["registry.opentofu.org/kislerdm/neon"]"#.to_owned(),
-            })?,
+            historical_provider(&state_resource(
+                r#"provider["registry.opentofu.org/kislerdm/neon"]"#,
+            ))?,
             HistoricalProvider {
                 source: "kislerdm/neon".to_owned(),
                 alias: String::new(),
             }
         );
         assert_eq!(
-            historical_provider(&StateResource {
-                provider: r#"provider["registry.terraform.io/hashicorp/google-beta"].bootstrap"#
-                    .to_owned(),
-            })?,
+            historical_provider(&state_resource(
+                r#"provider["registry.terraform.io/hashicorp/google-beta"].bootstrap"#,
+            ))?,
             HistoricalProvider {
                 source: "hashicorp/google-beta".to_owned(),
                 alias: "bootstrap".to_owned(),
             }
         );
         assert_eq!(
-            historical_provider(&StateResource {
-                provider: r#"provider["providers.example.com/acme/cloud"]"#.to_owned(),
-            })?,
+            historical_provider(&state_resource(
+                r#"provider["providers.example.com/acme/cloud"]"#,
+            ))?,
             HistoricalProvider {
                 source: "providers.example.com/acme/cloud".to_owned(),
                 alias: String::new(),
             }
         );
         assert_eq!(
-            historical_provider(&StateResource {
-                provider: r#"provider["terraform.io/builtin/terraform"]"#.to_owned(),
-            })?,
+            historical_provider(&state_resource(
+                r#"provider["terraform.io/builtin/terraform"]"#,
+            ))?,
             HistoricalProvider {
                 source: "terraform.io/builtin/terraform".to_owned(),
                 alias: String::new(),
@@ -281,13 +324,43 @@ mod tests {
     }
 
     #[test]
-    fn test_historical_provider_rejects_invalid_source() {
-        assert!(
-            historical_provider(&StateResource {
-                provider: r#"provider["example"]"#.to_owned(),
-            })
-            .is_err()
+    fn test_historical_resource_preserves_terraform_address() -> Result<()> {
+        let provider = r#"provider["registry.opentofu.org/hashicorp/google"]"#;
+
+        let managed = historical_resource(&StateResource {
+            mode: StateResourceMode::Managed,
+            resource_type: "google_project".to_owned(),
+            name: "example".to_owned(),
+            module: None,
+            provider: provider.to_owned(),
+        })?;
+        let data = historical_resource(&StateResource {
+            mode: StateResourceMode::Data,
+            resource_type: "google_project".to_owned(),
+            name: "example".to_owned(),
+            module: None,
+            provider: provider.to_owned(),
+        })?;
+        let module = historical_resource(&StateResource {
+            mode: StateResourceMode::Managed,
+            resource_type: "google_project".to_owned(),
+            name: "example".to_owned(),
+            module: Some(r#"module.regions["west"]"#.to_owned()),
+            provider: provider.to_owned(),
+        })?;
+
+        assert_eq!(managed.address, "google_project.example");
+        assert_eq!(data.address, "data.google_project.example");
+        assert_eq!(
+            module.address,
+            r#"module.regions["west"].google_project.example"#
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_historical_provider_rejects_invalid_source() {
+        assert!(historical_provider(&state_resource(r#"provider["example"]"#)).is_err());
     }
 
     #[test]
@@ -296,12 +369,7 @@ mod tests {
             r#"module.database.provider["registry.opentofu.org/hashicorp/google"]"#,
             r#"provider["registry.opentofu.org/hashicorp/aws"].by_region["eu-west-1"]"#,
         ] {
-            assert!(
-                historical_provider(&StateResource {
-                    provider: provider.to_owned(),
-                })
-                .is_err()
-            );
+            assert!(historical_provider(&state_resource(provider)).is_err());
         }
     }
 
@@ -337,8 +405,8 @@ environment="$(basename "$PWD")"
 if [[ "$*" == "state pull" ]]; then
     case "$environment" in
         absent) ;;
-        legacy) printf '%s' '{"version":4,"resources":[{"type":"neon_project","provider":"provider[\"registry.opentofu.org/kislerdm/neon\"]"},{"type":"google_secret_manager_secret_version","provider":"provider[\"registry.opentofu.org/hashicorp/google\"].bootstrap"}]}' ;;
-        live) if [[ ! -f removed ]]; then printf '%s' '{"version":4,"resources":[{"type":"neon_project","provider":"provider[\"registry.opentofu.org/kislerdm/neon\"]"}]}'; else printf '{"version":4}'; fi ;;
+        legacy) printf '%s' '{"version":4,"resources":[{"mode":"managed","type":"neon_project","name":"example","provider":"provider[\"registry.opentofu.org/kislerdm/neon\"]","instances":[{"index_key":0}]},{"mode":"data","type":"google_secret_manager_secret_version","name":"neon","provider":"provider[\"registry.opentofu.org/hashicorp/google\"].bootstrap","instances":[{"index_key":"current"}]}]}' ;;
+        live) if [[ ! -f removed ]]; then printf '%s' '{"version":4,"resources":[{"mode":"managed","type":"neon_project","name":"example","provider":"provider[\"registry.opentofu.org/kislerdm/neon\"]"}]}'; else printf '{"version":4}'; fi ;;
         outputs) printf '%s' '{"version":4,"outputs":{"host":{"value":"example"}}}' ;;
         malformed) printf '{}' ;;
         *) printf '{"version":4}' ;;
@@ -362,19 +430,25 @@ fi
 
         assert_eq!(reconciliation.environment, "legacy");
         assert_eq!(
-            reconciliation.required_providers,
+            reconciliation.state_resources,
             [
-                HistoricalProvider {
-                    source: "hashicorp/google".to_owned(),
-                    alias: "bootstrap".to_owned(),
+                HistoricalResource {
+                    address: "data.google_secret_manager_secret_version.neon".to_owned(),
+                    provider: HistoricalProvider {
+                        source: "hashicorp/google".to_owned(),
+                        alias: "bootstrap".to_owned(),
+                    },
                 },
-                HistoricalProvider {
-                    source: "kislerdm/neon".to_owned(),
-                    alias: String::new(),
+                HistoricalResource {
+                    address: "neon_project.example".to_owned(),
+                    provider: HistoricalProvider {
+                        source: "kislerdm/neon".to_owned(),
+                        alias: String::new(),
+                    },
                 },
             ]
         );
-        assert!(output_reconciliation.required_providers.is_empty());
+        assert!(output_reconciliation.state_resources.is_empty());
         assert!(absent.is_none());
         assert!(empty.is_none());
         assert!(malformed.is_err());

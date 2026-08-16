@@ -18,14 +18,19 @@ package cuet
 	alias:  _ | *""
 }
 
+#HistoricalResource: {
+	#HistoricalProvider
+	address: string
+}
+
 #TerraformInput: {
 	#module: string
 	#backendConfigs: [string]: [string]: {...}
 	#backendConfigs: _ | *{}
 	#envName: string
 	#env:     _
-	#historicalProviders: [...#HistoricalProvider]
-	#historicalProviders: _ | *[]
+	#historicalResources: [...#HistoricalResource]
+	#historicalResources: _ | *[]
 	#provider?:      string
 	#providerAlias?: string
 	#import?:        string
