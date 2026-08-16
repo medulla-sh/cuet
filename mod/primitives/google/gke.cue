@@ -186,6 +186,40 @@ import (
 	}
 }
 
+#GkeServiceAccountIamMember: {
+	in: {
+		#import?: string
+
+		name: string
+
+		googleServiceAccount: {
+			accountId: string
+			projectId: string
+		}
+		kubernetesServiceAccount: {
+			name:      string
+			namespace: string
+			projectId: string
+		}
+	}
+
+	let gsa = in.googleServiceAccount
+	let ksa = in.kubernetesServiceAccount
+	let iamMember = #ServiceAccountIamMember & {"in": {
+		if in.#import != _|_ {
+			#import: in.#import
+		}
+
+		name:             in.name
+		serviceAccountId: "projects/\(gsa.projectId)/serviceAccounts/\(gsa.accountId)@\(gsa.projectId).iam.gserviceaccount.com"
+		role:             "roles/iam.workloadIdentityUser"
+		member:           "serviceAccount:\(ksa.projectId).svc.id.goog[\(ksa.namespace)/\(ksa.name)]"
+	}}
+
+	ref: iamMember.ref
+	out: iamMember.out
+}
+
 #GkeCluster: {
 	in: {
 		#imports: {

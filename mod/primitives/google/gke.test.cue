@@ -26,6 +26,66 @@ package google
 	}
 }
 
+#GkeServiceAccountIamMemberTests: {
+	"same-project": {
+		input: #GkeServiceAccountIamMember & {"in": {
+			name: "buildkite-trusted-validator"
+			googleServiceAccount: {
+				accountId: "ci-validator"
+				projectId: "oakmont-internal"
+			}
+			kubernetesServiceAccount: {
+				name:      "buildkite-trusted-validator"
+				namespace: "buildkite"
+				projectId: "oakmont-internal"
+			}
+		}}
+
+		let resource = input.out.resource.google_service_account_iam_member["buildkite-trusted-validator"]
+		assert: input.ref == "google_service_account_iam_member.buildkite-trusted-validator"
+		assert: resource.service_account_id == "projects/oakmont-internal/serviceAccounts/ci-validator@oakmont-internal.iam.gserviceaccount.com"
+		assert: resource.role == "roles/iam.workloadIdentityUser"
+		assert: resource.member == "serviceAccount:oakmont-internal.svc.id.goog[buildkite/buildkite-trusted-validator]"
+	}
+
+	"cross-project": {
+		input: #GkeServiceAccountIamMember & {"in": {
+			name: "artifact-reader"
+			googleServiceAccount: {
+				accountId: "artifact-reader"
+				projectId: "identity-project"
+			}
+			kubernetesServiceAccount: {
+				name:      "reader"
+				namespace: "workloads"
+				projectId: "cluster-project"
+			}
+		}}
+
+		let resource = input.out.resource.google_service_account_iam_member["artifact-reader"]
+		assert: resource.service_account_id == "projects/identity-project/serviceAccounts/artifact-reader@identity-project.iam.gserviceaccount.com"
+		assert: resource.member == "serviceAccount:cluster-project.svc.id.goog[workloads/reader]"
+	}
+
+	"import": {
+		input: #GkeServiceAccountIamMember & {"in": {
+			#import: "projects/identity-project/serviceAccounts/artifact-reader@identity-project.iam.gserviceaccount.com roles/iam.workloadIdentityUser serviceAccount:cluster-project.svc.id.goog[workloads/reader]"
+			name:    "artifact-reader"
+			googleServiceAccount: {
+				accountId: "artifact-reader"
+				projectId: "identity-project"
+			}
+			kubernetesServiceAccount: {
+				name:      "reader"
+				namespace: "workloads"
+				projectId: "cluster-project"
+			}
+		}}
+
+		assert: input.out.resource.google_service_account_iam_member["artifact-reader"].#import == input.in.#import
+	}
+}
+
 #GkeClusterTests: {
 	"standard-cluster": {
 		input: #GkeCluster & {in: {
@@ -115,5 +175,6 @@ package google
 
 gkeResult: [
 	for _, test in #GkeKubernetesServiceAccountPrincipalTests {test.assert & true},
+	for _, test in #GkeServiceAccountIamMemberTests {test.assert & true},
 	for _, test in #GkeClusterTests {test.assert & true},
 ]
