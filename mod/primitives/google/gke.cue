@@ -6,21 +6,128 @@ import (
 	T "github.com/medulla-sh/cuet"
 )
 
-#GkeReleaseChannel:
-	"UNSPECIFIED" |
-	"RAPID" |
-	"REGULAR" |
-	"STABLE" |
-	"EXTENDED"
+#GkeReleaseChannelMap: {
+	unspecified: "UNSPECIFIED"
+	rapid:       "RAPID"
+	regular:     "REGULAR"
+	stable:      "STABLE"
+	extended:    "EXTENDED"
+}
 
-#GkeMeshManagement: "automatic" | "manual"
+#GkeReleaseChannel: or([for channel, _ in #GkeReleaseChannelMap {channel}])
 
 #GkeMeshManagementMap: {
 	automatic: "MANAGEMENT_AUTOMATIC"
 	manual:    "MANAGEMENT_MANUAL"
 }
 
+#GkeMeshManagement: or([for management, _ in #GkeMeshManagementMap {management}])
+
 #GkeHubLocation: "global" | #Region
+
+#GkeDatapathProviderMap: {
+	advanced: "ADVANCED_DATAPATH"
+	legacy:   "LEGACY_DATAPATH"
+}
+
+#GkeDatapathProvider: or([for provider, _ in #GkeDatapathProviderMap {provider}])
+
+#GkeNodePoolTaintEffectMap: {
+	"no-schedule":        "NO_SCHEDULE"
+	"prefer-no-schedule": "PREFER_NO_SCHEDULE"
+	"no-execute":         "NO_EXECUTE"
+}
+
+#GkeNodePoolTaintEffect: or([for effect, _ in #GkeNodePoolTaintEffectMap {effect}])
+
+#GkeNodePoolLocationPolicyMap: {
+	balanced: "BALANCED"
+	any:      "ANY"
+}
+
+#GkeNodePoolLocationPolicy: or([for policy, _ in #GkeNodePoolLocationPolicyMap {policy}])
+
+#GkeNodePoolConfig: {
+	zones: [...string]
+
+	machineType: string
+	machineType: _ | *"e2-standard-2"
+
+	imageType: string
+	imageType: _ | *"COS_CONTAINERD"
+
+	disk: {
+		type: string
+		type: _ | *"pd-balanced"
+
+		size: int & >0
+		size: _ | *100
+	}
+
+	pod: {
+		range?:      #RFC1035Name
+		maxPerNode?: int & >0
+	}
+
+	scaling: ({
+		autoscaling: {
+			min: int & >=0
+			max: int & >=min
+
+			locationPolicy: #GkeNodePoolLocationPolicy
+			locationPolicy: _ | *"balanced"
+		}
+	} | *{
+		fixed: {
+			count: int & >0
+			count: _ | *1
+		}
+	})
+
+	identity: {
+		serviceAccount?: string
+
+		accessScopes: [...string]
+		accessScopes: _ | *["https://www.googleapis.com/auth/cloud-platform"]
+	}
+
+	labels: [string]: string
+	labels: _ | *{}
+
+	taints: [...{
+		key:    string
+		value:  string
+		effect: #GkeNodePoolTaintEffect
+	}]
+	taints: _ | *[]
+
+	management: {
+		autoRepair: bool
+		autoRepair: _ | *true
+	}
+
+	upgrade: {
+		automatic: bool
+		automatic: _ | *true
+
+		maxSurge: int & >=0
+		maxSurge: _ | *1
+
+		maxUnavailable: int & >=0
+		maxUnavailable: _ | *0
+		if maxSurge == 0 && maxUnavailable == 0 {
+			_|_("maxSurge and maxUnavailable cannot both be zero")
+		}
+	}
+
+	security: {
+		secureBoot: bool
+		secureBoot: _ | *true
+
+		integrityMonitoring: bool
+		integrityMonitoring: _ | *true
+	}
+}
 
 #DefaultComputeServiceAccount: {
 	in: {
@@ -81,9 +188,12 @@ import (
 
 #GkeCluster: {
 	in: {
-		#import?: string
+		#imports: {
+			cluster?: string
+			nodePools?: [#RFC1035Name]: string
+		}
 
-		name:     string
+		name:     #RFC1035Name
 		location: #Region
 
 		project: {
@@ -92,53 +202,96 @@ import (
 		}
 		project: _ | *{}
 
-		network:    string
-		subnetwork: string
+		mode: "autopilot" | "standard"
+		mode: _ | *"autopilot"
 
-		podRangeName:     #RFC1035Name
-		serviceRangeName: #RFC1035Name
+		networking: {
+			vpc:    string
+			subnet: string
+			ranges: {
+				pods:     #RFC1035Name
+				services: #RFC1035Name
+			}
 
-		workloadPool?: string
+			if mode == "standard" {
+				datapath: {
+					provider: #GkeDatapathProvider
+					provider: _ | *"advanced"
 
-		meshCertificates: bool
-		meshCertificates: _ | *false
+					intranodeVisibility: bool
+					intranodeVisibility: _ | *true
 
-		secretManager: bool
-		secretManager: _ | *false
-
-		managedOpenTelemetry: bool
-		managedOpenTelemetry: _ | *false
-
-		secretSync: {
-			enabled: bool
-			enabled: _ | *false
-
-			rotationInterval?: =~"^([6-9][0-9]|[1-9][0-9]{2,})s$"
+					defaultSnat: bool
+					defaultSnat: _ | *true
+				}
+			}
 		}
-		secretSync: _ | *{}
+
+		access: {
+			nodeIPs: "public" | "private"
+			nodeIPs: _ | *"public"
+
+			controlPlaneEndpoint: "public" | "private"
+			controlPlaneEndpoint: _ | *"public"
+
+			// GKE requires a non-overlapping /28 when explicitly assigning this range.
+			controlPlaneIpv4Cidr?: net.IPCIDR & =~"^[0-9.]+/28$"
+
+			if controlPlaneEndpoint == "private" {
+				nodeIPs: "private"
+			}
+			if controlPlaneIpv4Cidr != _|_ {
+				nodeIPs: "private"
+			}
+		}
+
+		workloadIdentity: {
+			pool?: string
+		}
+
+		serviceMesh: {
+			certificates: bool
+			certificates: _ | *false
+		}
+
+		observability: {
+			managedOpenTelemetry: bool
+			managedOpenTelemetry: _ | *false
+		}
+
+		secrets: {
+			manager: bool
+			manager: _ | *false
+
+			sync?: {
+				rotationInterval?: =~"^([6-9][0-9]|[1-9][0-9]{2,})s$"
+			}
+		}
 
 		deletionProtection: bool
 		deletionProtection: _ | *true
 
-		assignPublicNodeIps: bool
-		assignPublicNodeIps: _ | *true
-
-		if !assignPublicNodeIps {
-			enablePublicEndpoint: bool
-			enablePublicEndpoint: _ | *true
-
-			// GKE requires a non-overlapping /28 when explicitly assigning this range.
-			masterIpv4CidrBlock?: net.IPCIDR & =~"^[0-9.]+/28$"
-		}
-
 		releaseChannel: #GkeReleaseChannel
-		releaseChannel: _ | *"REGULAR"
+		releaseChannel: _ | *"regular"
 
-		// TODO(LUM-15): Allow for non-autopilot GKE clusters
-		enableAutopilot: true
+		if mode == "standard" {
+			nodePools: [#RFC1035Name]: #GkeNodePoolConfig
+			if len(nodePools) == 0 {
+				_|_("Standard clusters require at least one node pool")
+			}
+		}
 	}
 
-	ref: "google_container_cluster.\(in.name)"
+	refs: {
+		cluster: "google_container_cluster.\(in.name)"
+		if in.mode == "standard" {
+			nodePools: {
+				for name, _ in in.nodePools {
+					(name): "google_container_node_pool.\(name)"
+				}
+			}
+		}
+	}
 
 	out: this=T.#TerraformInput & {
 		let projectDataName = [
@@ -146,7 +299,7 @@ import (
 			this.#envName,
 		][0]
 
-		if in.workloadPool == _|_ {
+		if in.workloadIdentity.pool == _|_ {
 			data: google_project: (projectDataName): {
 				if in.project.id != _|_ {
 					project_id: in.project.id
@@ -155,13 +308,13 @@ import (
 		}
 
 		let workloadPool = [
-			if in.workloadPool != _|_ {in.workloadPool},
-			if in.workloadPool == _|_ {"${data.google_project.\(projectDataName).project_id}.svc.id.goog"},
+			if in.workloadIdentity.pool != _|_ {in.workloadIdentity.pool},
+			if in.workloadIdentity.pool == _|_ {"${data.google_project.\(projectDataName).project_id}.svc.id.goog"},
 		][0]
 
 		resource: google_container_cluster: (in.name): {
-			if in.#import != _|_ {
-				#import: in.#import
+			if in.#imports.cluster != _|_ {
+				#import: in.#imports.cluster
 			}
 
 			name:     in.name
@@ -171,30 +324,39 @@ import (
 				project: in.project.id
 			}
 
-			enable_autopilot:    in.enableAutopilot
 			deletion_protection: in.deletionProtection
+			if in.mode == "autopilot" {
+				enable_autopilot: true
+			}
+			if in.mode == "standard" {
+				initial_node_count:          1
+				remove_default_node_pool:    true
+				datapath_provider:           #GkeDatapathProviderMap[in.networking.datapath.provider]
+				enable_intranode_visibility: in.networking.datapath.intranodeVisibility
+				default_snat_status: disabled: !in.networking.datapath.defaultSnat
+			}
 
-			network:    in.network
-			subnetwork: in.subnetwork
+			network:    in.networking.vpc
+			subnetwork: in.networking.subnet
 
 			networking_mode: "VPC_NATIVE"
 			ip_allocation_policy: {
-				cluster_secondary_range_name:  in.podRangeName
-				services_secondary_range_name: in.serviceRangeName
+				cluster_secondary_range_name:  in.networking.ranges.pods
+				services_secondary_range_name: in.networking.ranges.services
 			}
 
-			if !in.assignPublicNodeIps {
+			if in.access.nodeIPs == "private" {
 				private_cluster_config: {
 					enable_private_nodes: true
-					if !in.enablePublicEndpoint {
+					if in.access.controlPlaneEndpoint == "private" {
 						enable_private_endpoint: true
 					}
-					if in.masterIpv4CidrBlock != _|_ {
-						master_ipv4_cidr_block: in.masterIpv4CidrBlock
+					if in.access.controlPlaneIpv4Cidr != _|_ {
+						master_ipv4_cidr_block: in.access.controlPlaneIpv4Cidr
 					}
 				}
 
-				if !in.enablePublicEndpoint {
+				if in.access.controlPlaneEndpoint == "private" {
 					master_authorized_networks_config: {
 						gcp_public_cidrs_access_enabled: false
 					}
@@ -205,38 +367,118 @@ import (
 				workload_pool: workloadPool
 			}
 
-			if in.meshCertificates {
+			if in.serviceMesh.certificates {
 				mesh_certificates: {
 					enable_certificates: true
 				}
 			}
 
-			if in.secretManager {
+			if in.secrets.manager {
 				secret_manager_config: {
 					enabled: true
 				}
 			}
 
-			if in.managedOpenTelemetry {
+			if in.observability.managedOpenTelemetry {
 				managed_opentelemetry_config: {
 					scope: "COLLECTION_AND_INSTRUMENTATION_COMPONENTS"
 				}
 			}
 
-			if in.secretSync.enabled {
+			if in.secrets.sync != _|_ {
 				secret_sync_config: {
 					enabled: true
-					if in.secretSync.rotationInterval != _|_ {
+					if in.secrets.sync.rotationInterval != _|_ {
 						rotation_config: {
 							enabled:           true
-							rotation_interval: in.secretSync.rotationInterval
+							rotation_interval: in.secrets.sync.rotationInterval
 						}
 					}
 				}
 			}
 
 			release_channel: {
-				channel: in.releaseChannel
+				channel: #GkeReleaseChannelMap[in.releaseChannel]
+			}
+		}
+
+		if in.mode == "standard" {
+			for nodePoolName, nodePool in in.nodePools {
+				resource: google_container_node_pool: (nodePoolName): {
+					if in.#imports.nodePools[nodePoolName] != _|_ {
+						#import: in.#imports.nodePools[nodePoolName]
+					}
+
+					name:     nodePoolName
+					cluster:  "${\(refs.cluster).id}"
+					location: in.location
+
+					if in.project.id != _|_ {
+						project: in.project.id
+					}
+
+					if nodePool.scaling.fixed != _|_ {
+						node_count: nodePool.scaling.fixed.count
+					}
+
+					if len(nodePool.zones) > 0 {
+						node_locations: nodePool.zones
+					}
+
+					if nodePool.pod.maxPerNode != _|_ {
+						max_pods_per_node: nodePool.pod.maxPerNode
+					}
+
+					if nodePool.pod.range != _|_ {
+						network_config: {
+							create_pod_range: false
+							pod_range:        nodePool.pod.range
+						}
+					}
+
+					if nodePool.scaling.autoscaling != _|_ {
+						autoscaling: {
+							total_min_node_count: nodePool.scaling.autoscaling.min
+							total_max_node_count: nodePool.scaling.autoscaling.max
+							location_policy:      #GkeNodePoolLocationPolicyMap[nodePool.scaling.autoscaling.locationPolicy]
+						}
+					}
+
+					management: {
+						auto_repair:  nodePool.management.autoRepair
+						auto_upgrade: nodePool.upgrade.automatic
+					}
+
+					upgrade_settings: {
+						max_surge:       nodePool.upgrade.maxSurge
+						max_unavailable: nodePool.upgrade.maxUnavailable
+					}
+
+					node_config: {
+						machine_type: nodePool.machineType
+						disk_type:    nodePool.disk.type
+						disk_size_gb: nodePool.disk.size
+						image_type:   nodePool.imageType
+
+						if nodePool.identity.serviceAccount != _|_ {
+							service_account: nodePool.identity.serviceAccount
+						}
+
+						oauth_scopes: nodePool.identity.accessScopes
+						labels:       nodePool.labels
+
+						taint: [for taint in nodePool.taints {
+							key:    taint.key
+							value:  taint.value
+							effect: #GkeNodePoolTaintEffectMap[taint.effect]
+						}]
+
+						shielded_instance_config: {
+							enable_secure_boot:          nodePool.security.secureBoot
+							enable_integrity_monitoring: nodePool.security.integrityMonitoring
+						}
+					}
+				}
 			}
 		}
 	}
