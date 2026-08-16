@@ -106,8 +106,10 @@ Plan changes include both unapplied configuration and infrastructure changed
 outside Terraform. Drift checks require OpenTofu/Terraform, backend access, and
 any credentials needed to refresh providers and remote state. They may
 initialize generated working directories, download providers, refresh remote
-objects, and lock state. `--target` cannot be used with `modules check` because
-the command always checks every populated environment in the workspace.
+objects, and lock state. Plans run concurrently without printing their output.
+Pass `--jobs COUNT` to limit the number of active plans. `--target` cannot be
+used with `modules check` because the command always checks every populated
+environment in the workspace.
 
 ## Useful commands
 

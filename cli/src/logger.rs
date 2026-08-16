@@ -3,6 +3,7 @@ use std::fmt;
 use std::io::{IsTerminal, stderr};
 
 pub struct Logger {
+    enabled: bool,
     is_term: bool,
     pub verbose: bool,
 }
@@ -10,12 +11,24 @@ pub struct Logger {
 impl Logger {
     pub fn new(verbose: bool) -> Self {
         Self {
+            enabled: true,
             verbose,
             is_term: stderr().is_terminal(),
         }
     }
 
+    pub fn silent() -> Self {
+        Self {
+            enabled: false,
+            verbose: false,
+            is_term: false,
+        }
+    }
+
     pub fn write(&self, msg: fmt::Arguments<'_>) {
+        if !self.enabled {
+            return;
+        }
         if self.is_term {
             eprintln!(" {} {}", "•".dimmed(), msg.dimmed());
         } else {

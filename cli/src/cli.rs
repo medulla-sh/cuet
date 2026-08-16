@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand, ValueHint};
 use clap_complete::engine::ArgValueCompleter;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
@@ -223,6 +224,10 @@ pub enum ModulesCommand {
         /// Run a plan for every populated environment and fail if any plan reports changes
         #[arg(long)]
         drift: bool,
+
+        /// Maximum number of plans to run concurrently. Defaults to all plans.
+        #[arg(short = 'j', long, value_name = "COUNT", requires = "drift")]
+        jobs: Option<NonZeroUsize>,
     },
 }
 
@@ -383,7 +388,10 @@ mod tests {
         assert!(matches!(
             cli.command,
             Commands::Modules {
-                command: ModulesCommand::Check { drift: false }
+                command: ModulesCommand::Check {
+                    drift: false,
+                    jobs: None,
+                }
             }
         ));
     }
@@ -395,9 +403,35 @@ mod tests {
         assert!(matches!(
             cli.command,
             Commands::Modules {
-                command: ModulesCommand::Check { drift: true }
+                command: ModulesCommand::Check {
+                    drift: true,
+                    jobs: None,
+                }
             }
         ));
+    }
+
+    #[test]
+    fn test_cli_parses_modules_check_jobs() {
+        let cli =
+            Cli::try_parse_from(["cuet", "modules", "check", "--drift", "--jobs", "3"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Commands::Modules {
+                command: ModulesCommand::Check {
+                    drift: true,
+                    jobs: Some(jobs),
+                }
+            } if jobs.get() == 3
+        ));
+    }
+
+    #[test]
+    fn test_cli_rejects_modules_check_jobs_without_drift() {
+        let error = Cli::try_parse_from(["cuet", "modules", "check", "--jobs", "2"]).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
     }
 
     #[test]

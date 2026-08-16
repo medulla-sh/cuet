@@ -1,6 +1,6 @@
 [package]
 name = "cuet"
-version = "0.10.0"
+version = "0.10.1"
 edition = "2024"
 description = "A CLI for managing infrastructure deployment using the cuet framework."
 license = "MIT"
@@ -19,6 +19,7 @@ clap = { version = "4.5.53", features = ["derive", "unicode", "wrap_help"] }
 # 4.6.7's dynamic feature depends on an unavailable shlex 2.x release.
 clap_complete = { version = "=4.6.6", features = ["unstable-dynamic"] }
 humantime = "2.4.0"
+indicatif = "0.18.3"
 inquire = "0.9.4"
 libc = "0.2.178"
 miette = { version = "7.6.0", features = ["fancy"] }

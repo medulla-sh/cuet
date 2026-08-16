@@ -29,6 +29,12 @@ pub enum TerraformRunResult {
     Command(ExitStatus),
 }
 
+#[derive(Clone, Copy)]
+enum ExecutionIo {
+    Inherit,
+    Suppress,
+}
+
 impl TerraformRunResult {
     pub fn into_status(self) -> ExitStatus {
         match self {
@@ -233,6 +239,59 @@ pub fn run_tf_with_metadata(
     automatic_init_args: &[&str],
     timeout: Option<Duration>,
 ) -> Result<TerraformRunResult> {
+    run_tf_with_metadata_io(
+        logger,
+        workspace,
+        env,
+        cue_bin,
+        tf_bin,
+        metadata,
+        args,
+        automatic_init_args,
+        timeout,
+        ExecutionIo::Inherit,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_tf_check_with_metadata(
+    logger: &Logger,
+    workspace: &Workspace,
+    env: &str,
+    cue_bin: &Path,
+    tf_bin: &Path,
+    metadata: &TerraformMetadata<'_>,
+    args: &[String],
+    automatic_init_args: &[&str],
+    timeout: Option<Duration>,
+) -> Result<TerraformRunResult> {
+    run_tf_with_metadata_io(
+        logger,
+        workspace,
+        env,
+        cue_bin,
+        tf_bin,
+        metadata,
+        args,
+        automatic_init_args,
+        timeout,
+        ExecutionIo::Suppress,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_tf_with_metadata_io(
+    logger: &Logger,
+    workspace: &Workspace,
+    env: &str,
+    cue_bin: &Path,
+    tf_bin: &Path,
+    metadata: &TerraformMetadata<'_>,
+    args: &[String],
+    automatic_init_args: &[&str],
+    timeout: Option<Duration>,
+    io: ExecutionIo,
+) -> Result<TerraformRunResult> {
     let (export_status, output_dir) = export_reconciled_terraform(
         logger,
         workspace,
@@ -240,6 +299,7 @@ pub fn run_tf_with_metadata(
         cue_bin,
         metadata.backend_override_value,
         metadata.reconciliation,
+        io,
     )?;
     if !export_status.success() {
         return Ok(TerraformRunResult::Export(export_status));
@@ -250,22 +310,18 @@ pub fn run_tf_with_metadata(
         && command != "init"
         && !terraform::initialized(&output_dir, &args[..index])
     {
-        let init_status = terraform::run_with_timeout(
-            logger,
-            &mut terraform::init_command(tf_bin, &output_dir, &args[..index], automatic_init_args)?,
-            timeout,
-        )?;
+        let mut command =
+            terraform::init_command(tf_bin, &output_dir, &args[..index], automatic_init_args)?;
+        configure_io(&mut command, io);
+        let init_status = terraform::run_with_timeout(logger, &mut command, timeout)?;
         if !init_status.success() {
             return Ok(TerraformRunResult::Init(init_status));
         }
     }
 
-    terraform::run_with_timeout(
-        logger,
-        &mut terraform::command(tf_bin, &output_dir, args),
-        timeout,
-    )
-    .map(TerraformRunResult::Command)
+    let mut command = terraform::command(tf_bin, &output_dir, args);
+    configure_io(&mut command, io);
+    terraform::run_with_timeout(logger, &mut command, timeout).map(TerraformRunResult::Command)
 }
 
 fn export_reconciled_terraform(
@@ -275,6 +331,7 @@ fn export_reconciled_terraform(
     cue_bin: &Path,
     backend_override_value: &str,
     reconciliation: Option<&Reconciliation<'_>>,
+    io: ExecutionIo,
 ) -> Result<(ExitStatus, PathBuf)> {
     let output_dir = workspace.target_dir().join(OUTPUT_FOLDER_NAME).join(env);
     let status = export_terraform_expression_to(
@@ -283,6 +340,7 @@ fn export_reconciled_terraform(
         cue_bin,
         &reconciled_export_expression(workspace, env, backend_override_value, reconciliation),
         &output_dir,
+        io,
     )?;
     Ok((status, output_dir))
 }
@@ -320,6 +378,7 @@ pub fn export_terraform_to(
         cue_bin,
         &export_expression(workspace, env, backend_override_value),
         output_dir,
+        ExecutionIo::Inherit,
     )
 }
 
@@ -359,6 +418,7 @@ fn export_terraform_expression_to(
     cue_bin: &Path,
     expression: &str,
     output_dir: &Path,
+    io: ExecutionIo,
 ) -> Result<ExitStatus> {
     std::fs::create_dir_all(output_dir)
         .into_diagnostic()
@@ -366,10 +426,18 @@ fn export_terraform_expression_to(
     ensure_no_tfmigrate_override(output_dir)?;
     let output_file = output_dir.join(OUTPUT_FILE_NAME);
 
-    terraform::run(
-        logger,
-        &mut cue_export_file_command(cue_bin, workspace, expression, &output_file)?,
-    )
+    let mut command = cue_export_file_command(cue_bin, workspace, expression, &output_file)?;
+    configure_io(&mut command, io);
+    terraform::run(logger, &mut command)
+}
+
+fn configure_io(command: &mut Command, io: ExecutionIo) {
+    if matches!(io, ExecutionIo::Suppress) {
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+    }
 }
 
 pub fn read_migration_metadata<T: DeserializeOwned>(

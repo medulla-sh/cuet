@@ -111,8 +111,10 @@ cuet modules check --drift
 
 Drift checks require OpenTofu/Terraform, backend access, and any credentials
 needed to refresh providers and remote state. They may initialize generated
-working directories, download providers, and lock state. `--target` cannot be
-used with `modules check` because it always checks the whole workspace.
+working directories, download providers, and lock state. Plans run concurrently
+and their output is suppressed; use `--jobs COUNT` to limit concurrency.
+`--target` cannot be used with `modules check` because it always checks the
+whole workspace.
 
 ```bash
 cuet -t infra/neon:dev tf plan

@@ -3,17 +3,21 @@ use crate::completions;
 use crate::environment;
 use crate::execution::{
     TerraformMetadata, TerraformRunResult, check_cue_export, resolve_tool, run_cue,
-    run_tf_with_metadata,
+    run_tf_check_with_metadata, run_tf_with_metadata,
 };
 use crate::logger::Logger;
 use crate::migration::MigrationRunner;
+use crate::progress::CheckProgress;
 use crate::reconciliation;
 use crate::terraform;
 use crate::workspace::{Workspace, discover_modules, resolve_root};
 use clap::CommandFactory;
 use miette::{IntoDiagnostic, Result};
 use std::io::{self, Write};
+use std::num::NonZeroUsize;
 use std::process::ExitStatus;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::thread;
 
 const DEFAULT_CUE_BIN: &str = "cue";
@@ -52,7 +56,8 @@ fn run_from(
                     "--target cannot be used with `cuet modules check`; the command checks every populated environment in the workspace"
                 ));
             }
-            if matches!(command, ModulesCommand::Check { drift: true }) && cli.use_local_backend {
+            if matches!(command, ModulesCommand::Check { drift: true, .. }) && cli.use_local_backend
+            {
                 return Err(miette::miette!(
                     "--drift cannot be used with --use-local-backend; drift checks must plan against the configured backend"
                 ));
@@ -275,7 +280,7 @@ fn run_modules(
             }
             Ok(())
         }
-        ModulesCommand::Check { drift } => {
+        ModulesCommand::Check { drift, jobs } => {
             let cue_bin = resolve_tool(
                 cli.cue_path
                     .as_deref()
@@ -296,12 +301,12 @@ fn run_modules(
                 "null"
             };
             check_modules(
-                &Logger::new(cli.verbose),
                 root,
                 &cue_bin,
                 tf_bin.as_deref(),
                 backend_override_value,
                 cli.timeout,
+                *jobs,
             )
         }
     }
@@ -309,12 +314,12 @@ fn run_modules(
 
 #[allow(clippy::too_many_lines)]
 fn check_modules(
-    logger: &Logger,
     root: &std::path::Path,
     cue_bin: &std::path::Path,
     tf_bin: Option<&std::path::Path>,
     backend_override_value: &str,
     timeout: Option<std::time::Duration>,
+    jobs: Option<NonZeroUsize>,
 ) -> Result<()> {
     let mut failures = Vec::new();
     let workspaces = discover_modules(root)?
@@ -368,9 +373,11 @@ fn check_modules(
         }
     }
 
-    for (module, _, environment) in &checks {
-        info!(logger, "Checking {module}:{environment}");
-    }
+    let mut progress = CheckProgress::new(
+        checks
+            .iter()
+            .map(|(module, _, environment)| format!("{module}:{environment}")),
+    );
     for (chunk_index, chunk) in checks.chunks(workers).enumerate() {
         let results = thread::scope(|scope| {
             let handles: Vec<_> = chunk
@@ -394,7 +401,11 @@ fn check_modules(
         for (index, ((module, _, environment), result)) in chunk.iter().zip(results).enumerate() {
             match result {
                 Ok(output) if output.status.success() => {
-                    successful_checks.push(chunk_index * workers + index);
+                    let check_index = chunk_index * workers + index;
+                    successful_checks.push(check_index);
+                    if tf_bin.is_none() {
+                        progress.succeed(check_index);
+                    }
                 }
                 Ok(output) => {
                     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -405,8 +416,12 @@ fn check_modules(
                         format!("\n  {}", stderr.replace('\n', "\n  "))
                     };
                     failures.push(format!("{module}:{environment}: {}{detail}", output.status));
+                    progress.fail(chunk_index * workers + index);
                 }
-                Err(error) => failures.push(format!("{module}:{environment}: {error}")),
+                Err(error) => {
+                    failures.push(format!("{module}:{environment}: {error}"));
+                    progress.fail(chunk_index * workers + index);
+                }
             }
         }
     }
@@ -417,48 +432,117 @@ fn check_modules(
             "-detailed-exitcode".to_owned(),
             "-input=false".to_owned(),
         ];
-        for index in successful_checks {
-            let (module, workspace, environment) = &checks[index];
-            info!(logger, "Planning {module}:{environment}");
-            let result = (|| {
-                let reconciliation =
-                    reconciliation::inspect(logger, workspace, tf_bin, environment, timeout)?;
-                let metadata = TerraformMetadata {
-                    backend_override_value,
-                    reconciliation: reconciliation.as_ref(),
+        let worker_count = jobs.map_or(successful_checks.len(), NonZeroUsize::get);
+        let worker_count = worker_count.min(successful_checks.len());
+        let quiet_logger = Logger::silent();
+        let next = AtomicUsize::new(0);
+        thread::scope(|scope| -> Result<()> {
+            let (sender, receiver) = mpsc::channel();
+            let handles: Vec<_> = (0..worker_count)
+                .map(|_| {
+                    let sender = sender.clone();
+                    let next = &next;
+                    let successful_checks = &successful_checks;
+                    let checks = &checks;
+                    let plan_args = &plan_args;
+                    let quiet_logger = &quiet_logger;
+                    scope.spawn(move || {
+                        loop {
+                            let task_index = next.fetch_add(1, Ordering::Relaxed);
+                            let Some(&check_index) = successful_checks.get(task_index) else {
+                                break;
+                            };
+                            let (_, workspace, environment) = &checks[check_index];
+                            let result = (|| {
+                                let reconciliation = reconciliation::inspect(
+                                    quiet_logger,
+                                    workspace,
+                                    tf_bin,
+                                    environment,
+                                    timeout,
+                                )?;
+                                let metadata = TerraformMetadata {
+                                    backend_override_value,
+                                    reconciliation: reconciliation.as_ref(),
+                                };
+                                run_tf_check_with_metadata(
+                                    quiet_logger,
+                                    workspace,
+                                    environment,
+                                    cue_bin,
+                                    tf_bin,
+                                    &metadata,
+                                    plan_args,
+                                    &["-input=false"],
+                                    timeout,
+                                )
+                            })();
+                            if sender.send((check_index, result)).is_err() {
+                                break;
+                            }
+                        }
+                    })
+                })
+                .collect();
+            drop(sender);
+
+            let mut completed = 0;
+            while completed < successful_checks.len() {
+                let Ok((index, result)) = receiver.recv() else {
+                    break;
                 };
-                run_tf_with_metadata(
-                    logger,
-                    workspace,
-                    environment,
-                    cue_bin,
-                    tf_bin,
-                    &metadata,
-                    &plan_args,
-                    &["-input=false"],
-                    timeout,
-                )
-            })();
-            match result {
-                Ok(TerraformRunResult::Command(status)) if status.success() => {}
-                Ok(TerraformRunResult::Command(status)) if status.code() == Some(2) => {
-                    failures.push(format!(
-                        "{module}:{environment}: OpenTofu/Terraform plan reports changes"
-                    ));
+                completed += 1;
+                let (module, _, environment) = &checks[index];
+                match result {
+                    Ok(TerraformRunResult::Command(status)) if status.success() => {
+                        progress.succeed(index);
+                    }
+                    Ok(TerraformRunResult::Command(status)) if status.code() == Some(2) => {
+                        failures.push(format!(
+                            "{module}:{environment}: OpenTofu/Terraform plan reports changes"
+                        ));
+                        progress.fail(index);
+                    }
+                    Ok(TerraformRunResult::Command(status)) => {
+                        failures.push(format!(
+                            "{module}:{environment}: OpenTofu/Terraform plan failed: {status}"
+                        ));
+                        progress.fail(index);
+                    }
+                    Ok(TerraformRunResult::Export(status)) => {
+                        failures.push(format!(
+                            "{module}:{environment}: Terraform configuration export failed: {status}"
+                        ));
+                        progress.fail(index);
+                    }
+                    Ok(TerraformRunResult::Init(status)) => {
+                        failures.push(format!(
+                            "{module}:{environment}: OpenTofu/Terraform initialization failed: {status}"
+                        ));
+                        progress.fail(index);
+                    }
+                    Err(error) => {
+                        failures.push(format!("{module}:{environment}: {error}"));
+                        progress.fail(index);
+                    }
                 }
-                Ok(TerraformRunResult::Command(status)) => failures.push(format!(
-                    "{module}:{environment}: OpenTofu/Terraform plan failed: {status}"
-                )),
-                Ok(TerraformRunResult::Export(status)) => failures.push(format!(
-                    "{module}:{environment}: Terraform configuration export failed: {status}"
-                )),
-                Ok(TerraformRunResult::Init(status)) => failures.push(format!(
-                    "{module}:{environment}: OpenTofu/Terraform initialization failed: {status}"
-                )),
-                Err(error) => failures.push(format!("{module}:{environment}: {error}")),
             }
-        }
+
+            for handle in handles {
+                handle
+                    .join()
+                    .map_err(|_| miette::miette!("Terraform plan worker panicked"))?;
+            }
+            if completed != successful_checks.len() {
+                return Err(miette::miette!(
+                    "Terraform plan worker stopped unexpectedly"
+                ));
+            }
+            Ok(())
+        })?;
     }
+
+    progress.print_plain();
 
     if failures.is_empty() {
         return Ok(());
@@ -1145,7 +1229,10 @@ fi
             timeout: None,
             use_local_backend: false,
             command: Commands::Modules {
-                command: ModulesCommand::Check { drift: false },
+                command: ModulesCommand::Check {
+                    drift: false,
+                    jobs: None,
+                },
             },
         };
 
@@ -1189,7 +1276,10 @@ fi
         let mut cli = modules_cli(&temp)?;
         cli.cue_path = Some(cue_bin);
         cli.command = Commands::Modules {
-            command: ModulesCommand::Check { drift: false },
+            command: ModulesCommand::Check {
+                drift: false,
+                jobs: None,
+            },
         };
 
         let status = run_from(&cli, temp.path(), &mut Vec::new())?;
@@ -1208,7 +1298,7 @@ fi
         });
         for drift in [false, true] {
             cli.command = Commands::Modules {
-                command: ModulesCommand::Check { drift },
+                command: ModulesCommand::Check { drift, jobs: None },
             };
 
             let error = run_from(&cli, temp.path(), &mut Vec::new())
@@ -1225,7 +1315,10 @@ fi
         let mut cli = modules_cli(&temp)?;
         cli.use_local_backend = true;
         cli.command = Commands::Modules {
-            command: ModulesCommand::Check { drift: true },
+            command: ModulesCommand::Check {
+                drift: true,
+                jobs: None,
+            },
         };
 
         let error = run_from(&cli, temp.path(), &mut Vec::new())
@@ -1302,7 +1395,10 @@ esac
             timeout: None,
             use_local_backend: false,
             command: Commands::Modules {
-                command: ModulesCommand::Check { drift: true },
+                command: ModulesCommand::Check {
+                    drift: true,
+                    jobs: None,
+                },
             },
         };
 
@@ -1366,7 +1462,10 @@ touch '{}'
         cli.cue_path = Some(cue_bin);
         cli.tf_path = Some(tf_bin);
         cli.command = Commands::Modules {
-            command: ModulesCommand::Check { drift: true },
+            command: ModulesCommand::Check {
+                drift: true,
+                jobs: None,
+            },
         };
 
         let error = run_from(&cli, temp.path(), &mut Vec::new())
