@@ -37,7 +37,7 @@ import (
 			...
 		}
 
-		for name, accessor in (*in.accessors | {}) {
+		for name, accessor in in.accessors {
 			resource: google_secret_manager_secret_iam_member: ("\(secretName)-\(name)-accessor"): {
 				secret_id: "${\(secretRef).id}"
 				role:      "roles/secretmanager.secretAccessor"
