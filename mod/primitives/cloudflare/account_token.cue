@@ -2,6 +2,7 @@ package cloudflare
 
 import (
 	"encoding/json"
+	"strings"
 	T "github.com/medulla-sh/cuet"
 )
 
@@ -19,7 +20,10 @@ import (
 		account: [...string]
 		zone: [...string]
 	}
-	resources: [string]: string | {[string]: string}
+	resources: {
+		scope: "account" | "zone" | "accountZones"
+		id:    string
+	}
 }
 
 #AccountToken: {
@@ -61,6 +65,12 @@ import (
 			account_id: in.accountId
 			name:       in.name
 			policies: [for policy in in.policies {
+				let resourceIdExpression = [
+					if strings.HasPrefix(policy.resources.id, "${") && strings.HasSuffix(policy.resources.id, "}") {
+						strings.TrimSuffix(strings.TrimPrefix(policy.resources.id, "${"), "}")
+					},
+					json.Marshal(policy.resources.id),
+				][0]
 				effect: policy.effect
 				permission_groups: [_, ...]
 				permission_groups: [
@@ -70,7 +80,19 @@ import (
 						id: #"${local.\#(permissionsLocalName)["\#(localKey)"].id}"#
 					},
 				]
-				resources: json.Marshal(policy.resources)
+				resources: [
+					if policy.resources.scope == "account" {
+						json.Marshal({("com.cloudflare.api.account.\(policy.resources.id)"): "*"})
+					},
+					if policy.resources.scope == "accountZones" {
+						json.Marshal({("com.cloudflare.api.account.\(policy.resources.id)"): {
+							"com.cloudflare.api.account.zone.*": "*"
+						}})
+					},
+					if policy.resources.scope == "zone" {
+						#"${jsonencode({(format("com.cloudflare.api.account.zone.%s", \#(resourceIdExpression))): "*"})}"#
+					},
+				][0]
 			}]
 		}
 	}
