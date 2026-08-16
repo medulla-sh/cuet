@@ -22,6 +22,7 @@ import (
 	"monitoring.googleapis.com" |
 	"networksecurity.googleapis.com" |
 	"networkservices.googleapis.com" |
+	"pubsub.googleapis.com" |
 	"run.googleapis.com" |
 	"secretmanager.googleapis.com" |
 	"servicenetworking.googleapis.com" |
