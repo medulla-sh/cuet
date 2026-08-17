@@ -80,6 +80,10 @@ import T "github.com/medulla-sh/cuet"
 		serviceAccountEmail: string & !=""
 		audience:            string & =~"^https://"
 		audience:            _ | *endpoint
+		payloadUnwrapping?: {
+			writeMetadata: bool
+			writeMetadata: _ | *false
+		}
 
 		ackDeadlineSeconds:       int & >=10 & <=600
 		ackDeadlineSeconds:       _ | *10
@@ -113,7 +117,9 @@ import T "github.com/medulla-sh/cuet"
 			}
 			push_config: {
 				push_endpoint: in.endpoint
-				no_wrapper: write_metadata: false
+				if in.payloadUnwrapping != _|_ {
+					no_wrapper: write_metadata: in.payloadUnwrapping.writeMetadata
+				}
 				oidc_token: {
 					service_account_email: in.serviceAccountEmail
 					audience:              in.audience

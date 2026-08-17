@@ -50,7 +50,6 @@ package google
 		let subscription = input.out.resource.google_pubsub_subscription["flux-dev"]
 		assert: subscription.push_config == {
 			push_endpoint: "https://flux.example/hook/token"
-			no_wrapper: write_metadata: false
 			oidc_token: {
 				service_account_email: "events@example.iam.gserviceaccount.com"
 				audience:              "https://flux.example/hook/token"
@@ -59,6 +58,34 @@ package google
 		assert: subscription.retry_policy == {
 			minimum_backoff: "10s"
 			maximum_backoff: "600s"
+		}
+	}
+	"push-subscription-unwrapped": {
+		input: #PubSubPushSubscription & {in: {
+			name:  "flux-dev"
+			topic: "projects/example/topics/gcr"
+			project: name: "internal"
+			endpoint:            "https://flux.example/hook/token"
+			serviceAccountEmail: "events@example.iam.gserviceaccount.com"
+			payloadUnwrapping: {}
+		}}
+
+		assert: input.out.resource.google_pubsub_subscription["flux-dev"].push_config.no_wrapper == {
+			write_metadata: false
+		}
+	}
+	"push-subscription-unwrapped-with-metadata": {
+		input: #PubSubPushSubscription & {in: {
+			name:  "flux-dev"
+			topic: "projects/example/topics/gcr"
+			project: name: "internal"
+			endpoint:            "https://flux.example/hook/token"
+			serviceAccountEmail: "events@example.iam.gserviceaccount.com"
+			payloadUnwrapping: writeMetadata: true
+		}}
+
+		assert: input.out.resource.google_pubsub_subscription["flux-dev"].push_config.no_wrapper == {
+			write_metadata: true
 		}
 	}
 }
