@@ -2,6 +2,8 @@
 
 package buildkite
 
+import "encoding/yaml"
+
 #PipelineTests: {
 	"defaults": {
 		input: #Pipeline & {in: {
@@ -35,7 +37,7 @@ package buildkite
 			defaultBranch:                        "main"
 			cancelIntermediateBuilds:             true
 			cancelIntermediateBuildsBranchFilter: "!main"
-			steps:                                "steps:\n  - command: just check\n"
+			definition: steps: [{command: "just check"}]
 			providerSettings: {
 				triggerMode:                             "code"
 				buildBranches:                           false
@@ -57,6 +59,7 @@ package buildkite
 		assert: input.out.resource.buildkite_pipeline["oakmont-ci"].default_branch == "main"
 		assert: input.out.resource.buildkite_pipeline["oakmont-ci"].cancel_intermediate_builds == true
 		assert: input.out.resource.buildkite_pipeline["oakmont-ci"].cancel_intermediate_builds_branch_filter == "!main"
+		assert: input.out.resource.buildkite_pipeline["oakmont-ci"].steps == "steps:\n  - command: just check\n"
 		assert: input.out.resource.buildkite_pipeline["oakmont-ci"].provider_settings == {
 			trigger_mode:                                  "code"
 			build_branches:                                false
@@ -70,6 +73,37 @@ package buildkite
 			publish_commit_status_per_step:                false
 			separate_pull_request_statuses:                true
 		}
+	}
+
+	"pipeline definition": {
+		input: #Pipeline & {in: {
+			name:       "schema"
+			repository: "git@github.com:oakmont-health/oakmont.git"
+			clusterId:  "${buildkite_cluster.validation.id}"
+			definition: {
+				env: CI: "true"
+				steps: [
+					{block: "Approve", key: "approval"},
+					{
+						input: "Release details"
+						key:   "release-details"
+						fields: [{text: "Version", key: "version"}]
+					},
+					"wait",
+					{label: "Test", key: "test", command: "just test"},
+					{trigger: "deploy", label: "Deploy"},
+					{
+						group: "Checks"
+						steps: [{command: "just check"}]
+					},
+				]
+			}
+		}}
+
+		let rendered = yaml.Unmarshal(input.out.resource.buildkite_pipeline.schema.steps)
+
+		assert: rendered.env.CI == "true"
+		assert: len(rendered.steps) == 6
 	}
 
 	"tag ingress": {

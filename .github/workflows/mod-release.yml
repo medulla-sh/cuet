@@ -17,6 +17,11 @@ jobs:
         uses: actions/checkout@v4
       - name: Install CUE
         uses: cue-lang/setup-cue@v1.0.1
+        with:
+          version: v0.17.1
+      - name: Generate Buildkite pipeline schema
+        working-directory: mod
+        run: ../scripts/generate-buildkite-schema.sh
       - name: Tidy module
         working-directory: mod
         run: cue mod tidy

@@ -1,6 +1,10 @@
 package buildkite
 
-import T "github.com/medulla-sh/cuet"
+import (
+	"encoding/yaml"
+
+	T "github.com/medulla-sh/cuet"
+)
 
 #PipelineVisibility: "PRIVATE" | "PUBLIC"
 
@@ -68,7 +72,7 @@ import T "github.com/medulla-sh/cuet"
 		defaultTimeoutMinutes?: int & >=0
 		maximumTimeoutMinutes?: int & >=0
 
-		steps?: string
+		definition?: #PipelineDefinition
 
 		tags: [...string]
 		tags: _ | *[]
@@ -133,8 +137,8 @@ import T "github.com/medulla-sh/cuet"
 			if in.maximumTimeoutMinutes != _|_ {
 				maximum_timeout_in_minutes: in.maximumTimeoutMinutes
 			}
-			if in.steps != _|_ {
-				steps: in.steps
+			if in.definition != _|_ {
+				steps: yaml.Marshal(in.definition)
 			}
 
 			if in.providerSettings != _|_ {

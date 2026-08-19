@@ -19,9 +19,13 @@ jobs:
       - name: Install CUE
         uses: cue-lang/setup-cue@v1.0.1
         with:
-          version: v0.17.0
+          version: v0.17.1
+      - name: Generate Buildkite pipeline schema
+        run: ../scripts/generate-buildkite-schema.sh
+      - name: Check generated Buildkite pipeline schema
+        run: git diff --exit-code -- primitives/buildkite/pipeline_schema.gen.cue
       - name: Check formatting
-        run: cue fmt --check ./...
+        run: cue fmt --check ./... ../schemas/buildkite/upstream.cue
       - name: Validate
         run: cue vet ./...
       - name: Test primitives
