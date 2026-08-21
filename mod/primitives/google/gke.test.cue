@@ -107,9 +107,17 @@ package google
 			}
 			access: nodeIPs: "private"
 			deletionProtection: false
+			nodePools: "gcs-init": customNodeInit: initScript: gcs: {
+				uri:        "gs://example/init.sh"
+				generation: 42
+			}
 			nodePools: "app-connector": {
 				pod: range:                                              "app-connector-pods"
 				labels: "node-restriction.kubernetes.io/oakmont-egress": "app-connector"
+				customNodeInit: {
+					dependencies: ["google_secret_manager_secret_iam_member.app-connector-init"]
+					initScript: secretManagerSecretUri: "projects/example/secrets/app-connector-init/versions/3"
+				}
 				taints: [{
 					key:    "oakmont.health/app-connector"
 					value:  "true"
@@ -147,6 +155,12 @@ package google
 		}]
 		assert: input.out.resource.google_container_node_pool["app-connector"].node_config.disk_type == "pd-balanced"
 		assert: input.out.resource.google_container_node_pool["app-connector"].node_config.disk_size_gb == 100
+		assert: input.out.resource.google_container_node_pool["app-connector"].depends_on == ["google_secret_manager_secret_iam_member.app-connector-init"]
+		assert: input.out.resource.google_container_node_pool["app-connector"].node_config.linux_node_config.custom_node_init.init_script.gcp_secret_manager_secret_uri == "projects/example/secrets/app-connector-init/versions/3"
+		assert: input.out.resource.google_container_node_pool["gcs-init"].node_config.linux_node_config.custom_node_init.init_script == {
+			gcs_uri:        "gs://example/init.sh"
+			gcs_generation: 42
+		}
 		assert: input.refs.cluster == "google_container_cluster.internal"
 		assert: input.refs.nodePools["app-connector"] == "google_container_node_pool.app-connector"
 	}

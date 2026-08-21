@@ -91,6 +91,20 @@ import (
 		accessScopes: _ | *["https://www.googleapis.com/auth/cloud-platform"]
 	}
 
+	customNodeInit?: {
+		dependencies: [...string]
+		dependencies: _ | *[]
+
+		initScript: ({
+			gcs: {
+				uri:         string & !=""
+				generation?: int & >0
+			}
+		} | {
+			secretManagerSecretUri: string & !=""
+		})
+	}
+
 	labels: [string]: string
 	labels: _ | *{}
 
@@ -447,6 +461,12 @@ import (
 					cluster:  "${\(refs.cluster).id}"
 					location: in.location
 
+					if nodePool.customNodeInit != _|_ {
+						if len(nodePool.customNodeInit.dependencies) > 0 {
+							depends_on: nodePool.customNodeInit.dependencies
+						}
+					}
+
 					if in.project.id != _|_ {
 						project: in.project.id
 					}
@@ -501,6 +521,20 @@ import (
 
 						oauth_scopes: nodePool.identity.accessScopes
 						labels:       nodePool.labels
+
+						if nodePool.customNodeInit != _|_ {
+							linux_node_config: custom_node_init: init_script: {
+								if nodePool.customNodeInit.initScript.gcs != _|_ {
+									gcs_uri: nodePool.customNodeInit.initScript.gcs.uri
+									if nodePool.customNodeInit.initScript.gcs.generation != _|_ {
+										gcs_generation: nodePool.customNodeInit.initScript.gcs.generation
+									}
+								}
+								if nodePool.customNodeInit.initScript.secretManagerSecretUri != _|_ {
+									gcp_secret_manager_secret_uri: nodePool.customNodeInit.initScript.secretManagerSecretUri
+								}
+							}
+						}
 
 						taint: [for taint in nodePool.taints {
 							key:    taint.key

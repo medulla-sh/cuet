@@ -11,8 +11,9 @@ import (
 		name: string
 		name: _ | *secretId
 
-		secretId: string
-		value?:   string
+		secretId:               string
+		value?:                 string
+		versionDeletionPolicy?: "DELETE" | "DISABLE" | "ABANDON" | "PREVENT"
 		accessors: {[string]: string}
 		annotations: {[string]: string}
 	}
@@ -50,6 +51,9 @@ import (
 			resource: google_secret_manager_secret_version: (secretName): {
 				secret:      "${\(secretRef).id}"
 				secret_data: in.value
+				if in.versionDeletionPolicy != _|_ {
+					deletion_policy: in.versionDeletionPolicy
+				}
 			}
 		}
 	}
