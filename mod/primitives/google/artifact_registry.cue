@@ -41,8 +41,14 @@ import (
 
 		*{} | {
 			format: "DOCKER"
-			dockerConfig?: {
+			dockerConfig: {
 				immutableTags: bool
+			}
+		} | {
+			format: "DOCKER"
+			remoteConfig: {
+				description?:     string
+				publicRepository: "DOCKER_HUB"
 			}
 		}
 	}
@@ -65,6 +71,16 @@ import (
 			if in.dockerConfig != _|_ {
 				docker_config: {
 					immutable_tags: in.dockerConfig.immutableTags
+				}
+			}
+
+			if in.remoteConfig != _|_ {
+				mode: "REMOTE_REPOSITORY"
+				remote_repository_config: {
+					if in.remoteConfig.description != _|_ {
+						description: in.remoteConfig.description
+					}
+					docker_repository: public_repository: in.remoteConfig.publicRepository
 				}
 			}
 		}
