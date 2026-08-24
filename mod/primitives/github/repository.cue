@@ -60,22 +60,46 @@ import (
 			// Adopts an existing ruleset using a <repository>:<ruleset ID> identifier.
 			#import?: string
 
-			// Selects whether matching branches or tags are governed.
-			target: "branch" | "tag"
+			// Overrides the map key as the ruleset name displayed by GitHub.
+			name?: string & !=""
 
 			// Controls whether rules are active, evaluated, or disabled.
 			enforcement: "disabled" | "active" | "evaluate"
 			enforcement: _ | *"active"
 
-			conditions: refs: {
-				// Matches GitHub ref patterns, including ~DEFAULT_BRANCH and ~ALL.
-				include: [string, ...string]
+			({
+				// Selects the branch refs governed by this ruleset.
+				branches: {
+					include: [string, ...string]
+					exclude: [...string]
+				}
+			} | {
+				// Selects the tag refs governed by this ruleset.
+				tags: {
+					include: [string, ...string]
+					exclude: [...string]
+				}
+			})
 
-				// Exempts matching GitHub ref patterns.
-				exclude: [...string]
-			}
+			// Allows selected GitHub users or Apps to bypass this ruleset.
+			bypassActors: [...{
+				bypassMode: "always" | "pull_request" | "exempt"
+				bypassMode: _ | *"always"
+
+				({
+					// Resolves a GitHub user by login.
+					user: =~"^[A-Za-z0-9][A-Za-z0-9-]*$" & !~"-$"
+				} | {
+					// Resolves a GitHub App by slug.
+					app: =~"^[A-Za-z0-9][A-Za-z0-9-]*$" & !~"-$"
+				})
+			}]
 
 			rules: {
+				// Restricts matching ref updates to bypass actors.
+				preventUpdates: bool
+				preventUpdates: _ | *false
+
 				// Prevents matching refs from being deleted.
 				preventDeletion: bool
 				preventDeletion: _ | *false
@@ -219,6 +243,15 @@ import (
 		}
 
 		if in.rulesets != _|_ {
+			for _, ruleset in in.rulesets {
+				for actor in ruleset.bypassActors if actor.user != _|_ {
+					data: github_user: ("user-\(actor.user)"): username: actor.user
+				}
+				for actor in ruleset.bypassActors if actor.app != _|_ {
+					data: github_app: ("app-\(actor.app)"): slug: actor.app
+				}
+			}
+
 			resource: github_repository_ruleset: {
 				for name, ruleset in in.rulesets {
 					(name): {
@@ -226,17 +259,40 @@ import (
 							#import: ruleset.#import
 						}
 
-						"name":       name
+						"name":       *ruleset.name | name
 						"repository": "${\(ref).name}"
-						target:       ruleset.target
 						enforcement:  ruleset.enforcement
 
-						conditions: ref_name: {
-							include: ruleset.conditions.refs.include
-							exclude: ruleset.conditions.refs.exclude
+						if ruleset.branches != _|_ {
+							target: "branch"
+							conditions: ref_name: {
+								include: ruleset.branches.include
+								exclude: ruleset.branches.exclude
+							}
+						}
+						if ruleset.tags != _|_ {
+							target: "tag"
+							conditions: ref_name: {
+								include: ruleset.tags.include
+								exclude: ruleset.tags.exclude
+							}
 						}
 
+						bypass_actors: [for actor in ruleset.bypassActors {
+							if actor.user != _|_ {
+								actor_type:  "User"
+								actor_id:    "${data.github_user.user-\(actor.user).id}"
+								bypass_mode: actor.bypassMode
+							}
+							if actor.app != _|_ {
+								actor_type:  "Integration"
+								actor_id:    "${data.github_app.app-\(actor.app).id}"
+								bypass_mode: actor.bypassMode
+							}
+						}]
+
 						rules: {
+							update:                  ruleset.rules.preventUpdates
 							deletion:                ruleset.rules.preventDeletion
 							non_fast_forward:        ruleset.rules.preventForcePushes
 							required_linear_history: ruleset.rules.requireLinearHistory
