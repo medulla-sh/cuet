@@ -8,6 +8,7 @@ import (
 #GcpServices:
 	"artifactregistry.googleapis.com" |
 	"cloudresourcemanager.googleapis.com" |
+	"cloudidentity.googleapis.com" |
 	"cloudtrace.googleapis.com" |
 	"compute.googleapis.com" |
 	"connectgateway.googleapis.com" |
