@@ -20,9 +20,9 @@ package google
 			labels: {
 				"cloudidentity.googleapis.com/groups.discussion_forum": ""
 			}
-			display_name:         "Engineering"
-			initial_group_config: "EMPTY"
-			deletion_policy:      "PREVENT"
+			lifecycle: ignore_changes: ["initial_group_config"]
+			display_name:    "Engineering"
+			deletion_policy: "PREVENT"
 		}
 	}
 
@@ -61,22 +61,22 @@ package google
 				"cloudidentity.googleapis.com/groups.discussion_forum": ""
 				"cloudidentity.googleapis.com/groups.security":         ""
 			}
-			display_name:         "Security"
-			description:          "Security notifications"
-			initial_group_config: "EMPTY"
-			deletion_policy:      "PREVENT"
+			lifecycle: ignore_changes: ["initial_group_config"]
+			display_name:    "Security"
+			description:     "Security notifications"
+			deletion_policy: "PREVENT"
 		}
 		assert: input.out.resource.google_cloud_identity_group_membership["security-user"] == {
 			#providerAlias: "directory"
 			#import:        "groups/0123456789/memberships/1111111111"
-			group:          "${google_cloud_identity_group.security.id}"
+			group:          "groups/0123456789"
 			preferred_member_key: [{id: "user@example.com"}]
 			roles: [{name: "MEMBER"}]
 		}
 		assert: input.out.resource.google_cloud_identity_group_membership["security-owner"] == {
 			#providerAlias: "directory"
 			#import:        "groups/0123456789/memberships/2222222222"
-			group:          "${google_cloud_identity_group.security.id}"
+			group:          "groups/0123456789"
 			preferred_member_key: [{id: "owner@example.com"}]
 			roles: [{name: "MEMBER"}, {name: "OWNER"}]
 		}

@@ -22,9 +22,6 @@ import T "github.com/medulla-sh/cuet"
 		security: bool
 		security: _ | *false
 
-		initialGroupConfig: "WITH_INITIAL_OWNER" | "EMPTY"
-		initialGroupConfig: _ | *"EMPTY"
-
 		deletionPolicy: "PREVENT" | "ABANDON" | "DELETE"
 		deletionPolicy: _ | *"PREVENT"
 
@@ -61,10 +58,11 @@ import T "github.com/medulla-sh/cuet"
 					"cloudidentity.googleapis.com/groups.security": ""
 				}
 			}
+			// The provider injects its create-only default during import.
+			lifecycle: ignore_changes: ["initial_group_config"]
 
-			display_name:         in.displayName
-			initial_group_config: in.initialGroupConfig
-			deletion_policy:      in.deletionPolicy
+			display_name:    in.displayName
+			deletion_policy: in.deletionPolicy
 
 			if in.description != _|_ {
 				description: in.description
@@ -80,7 +78,10 @@ import T "github.com/medulla-sh/cuet"
 					#import: in.#import.memberships[name]
 				}
 
-				group: "${\(refs.group).id}"
+				group: [
+					if in.#import.memberships[name] != _|_ {in.#import.group},
+					"${\(refs.group).id}",
+				][0]
 				preferred_member_key: [{id: membership.email}]
 				roles: [
 					{name: "MEMBER"},
