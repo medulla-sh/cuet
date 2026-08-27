@@ -6,8 +6,8 @@ package google
 	"defaults": {
 		input: #CloudIdentityGroup & {in: {
 			name:        "engineering"
+			domain:      "example.com"
 			customerId:  "C01234567"
-			email:       "engineering@example.com"
 			displayName: "Engineering"
 			memberships: {}
 		}}
@@ -37,17 +37,14 @@ package google
 				}
 			}
 			name:        "security"
+			domain:      "example.com"
 			customerId:  "C01234567"
-			email:       "security@example.com"
 			displayName: "Security"
 			description: "Security notifications"
 			security:    true
 			memberships: {
-				user: email: "user@example.com"
-				owner: {
-					email: "owner@example.com"
-					role:  "OWNER"
-				}
+				user: _
+				owner: role: "owner"
 			}
 		}}
 
@@ -80,6 +77,38 @@ package google
 			preferred_member_key: [{id: "owner@example.com"}]
 			roles: [{name: "MEMBER"}, {name: "OWNER"}]
 		}
+	}
+
+	"derives name and preserves external member domain": {
+		input: #CloudIdentityGroup & {in: {
+			email:       "engineering@example.com"
+			customerId:  "C01234567"
+			displayName: "Engineering"
+			memberships: {
+				"contractor@vendor.example": role: "manager"
+			}
+		}}
+
+		assert: input.refs.group == "google_cloud_identity_group.engineering"
+		assert: input.refs.memberships["contractor@vendor.example"] == "google_cloud_identity_group_membership.engineering-contractor-vendor-example"
+		assert: input.out.resource.google_cloud_identity_group_membership["engineering-contractor-vendor-example"] == {
+			group: "${google_cloud_identity_group.engineering.id}"
+			preferred_member_key: [{id: "contractor@vendor.example"}]
+			roles: [{name: "MEMBER"}, {name: "MANAGER"}]
+		}
+	}
+
+	"derives name and full email from local email": {
+		input: #CloudIdentityGroup & {in: {
+			email:       "operations"
+			domain:      "example.com"
+			customerId:  "C01234567"
+			displayName: "Operations"
+			memberships: {}
+		}}
+
+		assert: input.refs.group == "google_cloud_identity_group.operations"
+		assert: input.out.resource.google_cloud_identity_group.operations.group_key == [{id: "operations@example.com"}]
 	}
 }
 

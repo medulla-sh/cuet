@@ -1,8 +1,15 @@
 package google
 
-import T "github.com/medulla-sh/cuet"
+import (
+	"strings"
 
-#CloudIdentityMembershipRole: "MEMBER" | "MANAGER" | "OWNER"
+	T "github.com/medulla-sh/cuet"
+)
+
+#CloudIdentityEmail:          string & =~"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$"
+#CloudIdentityEmailLocalPart: string & =~"^[A-Za-z0-9._%+-]+$"
+
+#CloudIdentityMembershipRole: "member" | "manager" | "owner"
 
 #CloudIdentityGroup: {
 	in: {
@@ -12,9 +19,14 @@ import T "github.com/medulla-sh/cuet"
 			memberships?: [string]: string
 		}
 
-		name:       string & !=""
+		let emailParts = strings.SplitN(*email | "", "@", 2)
+		name:       string & =~"^[A-Za-z_][A-Za-z0-9_-]*$"
+		name:       _ | *emailParts[0]
+		email:      #CloudIdentityEmail | #CloudIdentityEmailLocalPart
+		email:      _ | *"\(name)@\(domain)"
+		domain:     string & !="" & !~"@"
+		domain:     _ | *emailParts[1]
 		customerId: string & !=""
-		email:      string & !=""
 
 		displayName:  string & !=""
 		description?: string
@@ -26,17 +38,29 @@ import T "github.com/medulla-sh/cuet"
 		deletionPolicy: _ | *"PREVENT"
 
 		memberships: [string]: {
-			email: string & !=""
-			role:  #CloudIdentityMembershipRole
-			role:  _ | *"MEMBER"
+			role: #CloudIdentityMembershipRole
+			role: _ | *"member"
+		}
+	}
+	let groupEmail = ([
+		if strings.Contains(in.email, "@") {in.email},
+		if !strings.Contains(in.email, "@") {"\(in.email)@\(in.domain)"},
+	][0] & #CloudIdentityEmail)
+	#domainMatchesEmail: in.domain & strings.SplitN(groupEmail, "@", 2)[1]
+	let memberResourceNames = {
+		for member, _ in in.memberships {
+			(member): [
+				if !strings.Contains(member, "@") {member},
+				if strings.Contains(member, "@") {strings.Replace(strings.Replace(strings.Replace(strings.Replace(member, "@", "-", -1), ".", "-", -1), "+", "-", -1), "%", "-", -1)},
+			][0]
 		}
 	}
 
 	refs: {
 		group: "google_cloud_identity_group.\(in.name)"
 		memberships: {
-			for name, _ in in.memberships {
-				(name): "google_cloud_identity_group_membership.\(in.name)-\(name)"
+			for member, _ in in.memberships {
+				(member): "google_cloud_identity_group_membership.\(in.name)-\(memberResourceNames[member])"
 			}
 		}
 	}
@@ -51,7 +75,7 @@ import T "github.com/medulla-sh/cuet"
 			}
 
 			parent: "customers/\(in.customerId)"
-			group_key: [{id: in.email}]
+			group_key: [{id: groupEmail}]
 			labels: {
 				"cloudidentity.googleapis.com/groups.discussion_forum": ""
 				if in.security {
@@ -69,24 +93,28 @@ import T "github.com/medulla-sh/cuet"
 			}
 		}
 
-		for name, membership in in.memberships {
-			resource: google_cloud_identity_group_membership: ("\(in.name)-\(name)"): {
+		for member, membership in in.memberships {
+			let memberEmail = ([
+				if !strings.Contains(member, "@") {"\(member)@\(in.domain)"},
+				if strings.Contains(member, "@") {member},
+			][0] & #CloudIdentityEmail)
+			resource: google_cloud_identity_group_membership: ("\(in.name)-\(memberResourceNames[member])"): {
 				if in.#providerAlias != _|_ {
 					#providerAlias: in.#providerAlias
 				}
-				if in.#import.memberships[name] != _|_ {
-					#import: in.#import.memberships[name]
+				if in.#import.memberships[member] != _|_ {
+					#import: in.#import.memberships[member]
 				}
 
 				group: [
-					if in.#import.memberships[name] != _|_ {in.#import.group},
+					if in.#import.memberships[member] != _|_ {in.#import.group},
 					"${\(refs.group).id}",
 				][0]
-				preferred_member_key: [{id: membership.email}]
+				preferred_member_key: [{id: memberEmail}]
 				roles: [
 					{name: "MEMBER"},
-					if membership.role != "MEMBER" {
-						{name: membership.role}
+					if membership.role != "member" {
+						{name: strings.ToUpper(membership.role)}
 					},
 				]
 			}
