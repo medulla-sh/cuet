@@ -20,13 +20,12 @@ import (
 		}
 
 		let emailParts = strings.SplitN(*email | "", "@", 2)
-		name:       string & =~"^[A-Za-z_][A-Za-z0-9_-]*$"
-		name:       _ | *emailParts[0]
-		email:      #CloudIdentityEmail | #CloudIdentityEmailLocalPart
-		email:      _ | *"\(name)@\(domain)"
-		domain:     string & !="" & !~"@"
-		domain:     _ | *emailParts[1]
-		customerId: string & !=""
+		name:   string & =~"^[A-Za-z_][A-Za-z0-9_-]*$"
+		name:   _ | *emailParts[0]
+		email:  #CloudIdentityEmail | #CloudIdentityEmailLocalPart
+		email:  _ | *"\(name)@\(domain)"
+		domain: string & !="" & !~"@"
+		domain: _ | *emailParts[1]
 
 		displayName:  string & !=""
 		description?: string
@@ -42,6 +41,14 @@ import (
 			role: _ | *"member"
 		}
 	}
+	let providerAlias = *in.#providerAlias | "default"
+	let organization = #Organization & {"in": {
+		name:   "cloud-identity-\(strings.Replace(in.domain, ".", "-", -1))-\(providerAlias)"
+		domain: in.domain
+		if in.#providerAlias != _|_ {
+			#providerAlias: in.#providerAlias
+		}
+	}}
 	let groupEmail = ([
 		if strings.Contains(in.email, "@") {in.email},
 		if !strings.Contains(in.email, "@") {"\(in.email)@\(in.domain)"},
@@ -66,6 +73,8 @@ import (
 	}
 
 	out: T.#TerraformInput & {
+		organization.out
+
 		resource: google_cloud_identity_group: (in.name): {
 			if in.#providerAlias != _|_ {
 				#providerAlias: in.#providerAlias
@@ -74,7 +83,7 @@ import (
 				#import: in.#import.group
 			}
 
-			parent: "customers/\(in.customerId)"
+			parent: "customers/${\(organization.ref).directory_customer_id}"
 			group_key: [{id: groupEmail}]
 			labels: {
 				"cloudidentity.googleapis.com/groups.discussion_forum": ""

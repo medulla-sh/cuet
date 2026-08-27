@@ -7,7 +7,6 @@ package google
 		input: #CloudIdentityGroup & {in: {
 			name:        "engineering"
 			domain:      "example.com"
-			customerId:  "C01234567"
 			displayName: "Engineering"
 			memberships: {}
 		}}
@@ -15,7 +14,7 @@ package google
 		assert: input.refs.group == "google_cloud_identity_group.engineering"
 		assert: input.refs.memberships == {}
 		assert: input.out.resource.google_cloud_identity_group.engineering == {
-			parent: "customers/C01234567"
+			parent: "customers/${data.google_organization.cloud-identity-example-com-default.directory_customer_id}"
 			group_key: [{id: "engineering@example.com"}]
 			labels: {
 				"cloudidentity.googleapis.com/groups.discussion_forum": ""
@@ -23,6 +22,9 @@ package google
 			lifecycle: ignore_changes: ["initial_group_config"]
 			display_name:    "Engineering"
 			deletion_policy: "PREVENT"
+		}
+		assert: input.out.data.google_organization["cloud-identity-example-com-default"] == {
+			domain: "example.com"
 		}
 	}
 
@@ -38,7 +40,6 @@ package google
 			}
 			name:        "security"
 			domain:      "example.com"
-			customerId:  "C01234567"
 			displayName: "Security"
 			description: "Security notifications"
 			security:    true
@@ -52,7 +53,7 @@ package google
 		assert: input.out.resource.google_cloud_identity_group.security == {
 			#providerAlias: "directory"
 			#import:        "groups/0123456789"
-			parent:         "customers/C01234567"
+			parent:         "customers/${data.google_organization.cloud-identity-example-com-directory.directory_customer_id}"
 			group_key: [{id: "security@example.com"}]
 			labels: {
 				"cloudidentity.googleapis.com/groups.discussion_forum": ""
@@ -62,6 +63,10 @@ package google
 			display_name:    "Security"
 			description:     "Security notifications"
 			deletion_policy: "PREVENT"
+		}
+		assert: input.out.data.google_organization["cloud-identity-example-com-directory"] == {
+			#providerAlias: "directory"
+			domain:         "example.com"
 		}
 		assert: input.out.resource.google_cloud_identity_group_membership["security-user"] == {
 			#providerAlias: "directory"
@@ -82,7 +87,6 @@ package google
 	"derives name and preserves external member domain": {
 		input: #CloudIdentityGroup & {in: {
 			email:       "engineering@example.com"
-			customerId:  "C01234567"
 			displayName: "Engineering"
 			memberships: {
 				"contractor@vendor.example": role: "manager"
@@ -102,7 +106,6 @@ package google
 		input: #CloudIdentityGroup & {in: {
 			email:       "operations"
 			domain:      "example.com"
-			customerId:  "C01234567"
 			displayName: "Operations"
 			memberships: {}
 		}}
