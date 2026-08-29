@@ -13,6 +13,7 @@ import (
 	"compute.googleapis.com" |
 	"connectgateway.googleapis.com" |
 	"container.googleapis.com" |
+	"dns.googleapis.com" |
 	"gkeconnect.googleapis.com" |
 	"gkehub.googleapis.com" |
 	"iam.googleapis.com" |
