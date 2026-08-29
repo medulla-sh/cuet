@@ -53,6 +53,136 @@ package google
 
 		assert: input.out.resource.google_compute_global_address["google-services"].address == "10.250.0.0"
 	}
+
+	"private-connectivity": {
+		input: #Network & {in: {
+			name: "internal"
+			subnets: k8s: {
+				region:       "us-west1"
+				primaryRange: "nodes"
+				cidrs: nodes: "10.200.0.0/22"
+			}
+			peerings: "internal-to-dev": {
+				peerNetwork: "projects/example/global/networks/dev"
+			}
+			internalAddresses: "us-west1": "step-ca": {
+				subnet: "k8s"
+			}
+			firewallRules: "allow-dev-to-step-ca": {
+				direction: "ingress"
+				sourceRanges: ["10.100.0.0/22", "10.100.64.0/18"]
+				destinationAddresses: [{
+					region: "us-west1"
+					name:   "step-ca"
+				}]
+				protocols: tcp: port: 9000
+			}
+		}}
+
+		assert: input.out.resource.google_compute_network_peering["internal-to-dev"] == {
+			name:                 "internal-to-dev"
+			network:              "${google_compute_network.internal.id}"
+			peer_network:         "projects/example/global/networks/dev"
+			import_custom_routes: false
+			export_custom_routes: false
+		}
+		assert: input.out.resource.google_compute_address["us-west1__step-ca"] == {
+			name:         "step-ca"
+			region:       "us-west1"
+			address_type: "INTERNAL"
+			subnetwork:   "${google_compute_subnetwork.k8s.id}"
+		}
+		assert: input.out.resource.google_compute_firewall["allow-dev-to-step-ca"] == {
+			name:      "allow-dev-to-step-ca"
+			network:   "${google_compute_network.internal.id}"
+			direction: "INGRESS"
+			priority:  1000
+			source_ranges: ["10.100.0.0/22", "10.100.64.0/18"]
+			destination_ranges: ["${google_compute_address.us-west1__step-ca.address}/32"]
+			allow: [{protocol: "tcp", ports: ["9000"]}]
+			log_config: metadata: "INCLUDE_ALL_METADATA"
+		}
+		assert: input.refs.internalAddresses["us-west1"]["step-ca"] == "google_compute_address.us-west1__step-ca"
+	}
+
+	"unknown-firewall-address-rejected": {
+		input: {
+			name: "internal"
+			firewallRules: ca: {
+				direction: "ingress"
+				sourceRanges: ["10.100.0.0/22"]
+				destinationAddresses: [{
+					region: "us-west1"
+					name:   "missing"
+				}]
+				protocols: tcp: port: 9000
+			}
+		}
+
+		assert: (#Network & {in: input}) == _|_
+	}
+
+	"egress-firewall": {
+		input: #Network & {in: {
+			name: "internal"
+			firewallRules: "deny-internal-to-dev": {
+				direction: "egress"
+				action:    "deny"
+				destinationRanges: ["10.100.0.0/22"]
+				protocols: {
+					all: {}
+					icmp: {}
+				}
+			}
+		}}
+
+		let firewall = input.out.resource.google_compute_firewall["deny-internal-to-dev"]
+
+		assert: firewall.direction == "EGRESS"
+		assert: firewall.destination_ranges == ["10.100.0.0/22"]
+		assert: firewall.deny == [{protocol: "all"}, {protocol: "icmp"}]
+	}
+
+	"unknown-protocol-rejected": {
+		input: {
+			name: "internal"
+			firewallRules: ingress: {
+				direction: "ingress"
+				sourceRanges: ["10.100.0.0/22"]
+				protocols: gre: {}
+			}
+		}
+
+		assert: (#Network & {in: input}) == _|_
+	}
+
+	"empty-protocols-rejected": {
+		input: {
+			name: "internal"
+			firewallRules: ingress: {
+				direction: "ingress"
+				sourceRanges: ["10.100.0.0/22"]
+				protocols: {}
+			}
+		}
+
+		assert: (#Network & {in: input}) == _|_
+	}
+
+	"cross-region-address-rejected": {
+		input: {
+			name: "internal"
+			subnets: k8s: {
+				region:       "us-west1"
+				primaryRange: "nodes"
+				cidrs: nodes: "10.200.0.0/22"
+			}
+			internalAddresses: "us-east1": ca: subnet: "k8s"
+		}
+
+		assert: (#Network & {in: input}) == _|_
+	}
+
 	"source-based-rule": {
 		input: #Network & {in: {
 			name: "internal"

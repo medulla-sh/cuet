@@ -4,6 +4,7 @@ import (
 	"list"
 	"math/bits"
 	"net"
+	"struct"
 	"strings"
 )
 
@@ -36,6 +37,46 @@ import (
 }
 
 #PublicNatPortCount: int & >=32 & <=65536
+
+#FirewallRule: {
+	#import?: string
+
+	action: "allow" | "deny"
+	action: _ | *"allow"
+
+	priority: int & >=0 & <=65535
+	priority: _ | *1000
+
+	destinationAddresses: [...{
+		region: #Region
+		name:   #RFC1035Name
+	}]
+	destinationAddresses: _ | *[]
+
+	protocols: struct.MinFields(1) & {
+		["all" | "ah" | "esp" | "icmp" | "ipip"]: {}
+		["sctp" | "tcp" | "udp"]: {
+			port: int & >0 & <65536
+		}
+	}
+
+	logging: bool
+	logging: _ | *true
+
+	includeMetadata: bool
+	includeMetadata: _ | *true
+
+	{
+		direction: "ingress"
+		sourceRanges: [...net.IPCIDR]
+		sourceRanges: [_, ...]
+		destinationRanges?: [...net.IPCIDR]
+	} | {
+		direction: "egress"
+		destinationRanges: [...net.IPCIDR]
+		destinationRanges: [_, ...]
+	}
+}
 
 #NatConfig: {
 	#import?: {
@@ -164,7 +205,10 @@ import (
 	in: {
 		#import?: {
 			network?: string
-			subnets?: [string]: string
+			subnets?: [string]:  string
+			peerings?: [string]: string
+			internalAddresses?: [string]: [string]: string
+			firewallRules?: [string]: string
 			privateServiceAccess?: [string]: {
 				address?:    string
 				connection?: string
@@ -186,6 +230,23 @@ import (
 			service: string
 			service: _ | *"servicenetworking.googleapis.com"
 		}
+
+		peerings: [#RFC1035Name]: {
+			peerNetwork: string
+
+			importCustomRoutes: bool
+			importCustomRoutes: _ | *false
+
+			exportCustomRoutes: bool
+			exportCustomRoutes: _ | *false
+		}
+
+		internalAddresses: [#Region]: [#RFC1035Name]: {
+			subnet:   #RFC1035Name
+			address?: net.IP
+		}
+
+		firewallRules: [#RFC1035Name]: #FirewallRule
 
 		publicNats: [#Region]: [#RFC1035Name]: #NatConfig
 		publicNats: _ | *{}
@@ -277,12 +338,46 @@ import (
 			_|_("private service access CIDRs must not overlap subnet CIDRs")
 		}
 	}
+	for region, addresses in in.internalAddresses
+	for name, address in addresses {
+		if in.subnets[address.subnet] == _|_ {
+			_|_("internal address \(name) references unknown subnet \(address.subnet)")
+		}
+		if in.subnets[address.subnet].region != region {
+			_|_("internal address \(name) is not in subnet region \(region)")
+		}
+	}
+	for ruleName, rule in in.firewallRules
+	for address in rule.destinationAddresses {
+		if in.internalAddresses[address.region][address.name] == _|_ {
+			_|_("firewall rule \(ruleName) references unknown internal address \(address.name)")
+		}
+	}
 
 	refs: {
 		network: "google_compute_network.\(in.name)"
 		subnets: {
 			for name, _ in in.subnets {
 				(name): "google_compute_subnetwork.\(name)"
+			}
+		}
+		peerings: {
+			for name, _ in in.peerings {
+				(name): "google_compute_network_peering.\(name)"
+			}
+		}
+		internalAddresses: {
+			for region, addresses in in.internalAddresses {
+				(region): {
+					for name, _ in addresses {
+						(name): "google_compute_address.\(region)__\(name)"
+					}
+				}
+			}
+		}
+		firewallRules: {
+			for name, _ in in.firewallRules {
+				(name): "google_compute_firewall.\(name)"
 			}
 		}
 		routers: {
@@ -361,6 +456,93 @@ import (
 						ip_cidr_range: cidr
 					},
 				]
+			}
+		}
+
+		for name, peering in in.peerings {
+			resource: google_compute_network_peering: (name): {
+				if in.#import.peerings[name] != _|_ {
+					#import: in.#import.peerings[name]
+				}
+
+				"name":               name
+				network:              "${\(refs.network).id}"
+				peer_network:         peering.peerNetwork
+				import_custom_routes: peering.importCustomRoutes
+				export_custom_routes: peering.exportCustomRoutes
+			}
+		}
+
+		for region, addresses in in.internalAddresses
+		for name, address in addresses {
+			let resourceName = "\(region)__\(name)"
+			resource: google_compute_address: (resourceName): {
+				if in.#import.internalAddresses[region][name] != _|_ {
+					#import: in.#import.internalAddresses[region][name]
+				}
+
+				"name":       name
+				"region":     region
+				address_type: "INTERNAL"
+				subnetwork:   "${\(refs.subnets[address.subnet]).id}"
+				if address.address != _|_ {
+					"address": address.address
+				}
+			}
+		}
+
+		for name, rule in in.firewallRules {
+			let destinationRanges = [
+				if rule.destinationRanges != _|_ {
+					for cidr in rule.destinationRanges {cidr}
+				},
+				for address in rule.destinationAddresses {
+					"${\(refs.internalAddresses[address.region][address.name]).address}/32"
+				},
+			]
+			resource: google_compute_firewall: (name): {
+				if rule.#import != _|_ {
+					#import: rule.#import
+				}
+
+				"name":    name
+				network:   "${\(refs.network).id}"
+				direction: strings.ToUpper(rule.direction)
+				priority:  rule.priority
+
+				if rule.sourceRanges != _|_ {
+					source_ranges: rule.sourceRanges
+				}
+				if len(destinationRanges) > 0 {
+					destination_ranges: destinationRanges
+				}
+
+				if rule.action == "allow" {
+					allow: [for protocol, config in rule.protocols {
+						"protocol": protocol
+						if config.port != _|_ {
+							ports: ["\(config.port)"]
+						}
+					}]
+				}
+				if rule.action == "deny" {
+					deny: [for protocol, config in rule.protocols {
+						"protocol": protocol
+						if config.port != _|_ {
+							ports: ["\(config.port)"]
+						}
+					}]
+				}
+
+				if rule.logging {
+					log_config: metadata: string
+					if rule.includeMetadata {
+						log_config: metadata: "INCLUDE_ALL_METADATA"
+					}
+					if !rule.includeMetadata {
+						log_config: metadata: "EXCLUDE_ALL_METADATA"
+					}
+				}
 			}
 		}
 
