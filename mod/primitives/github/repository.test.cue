@@ -3,6 +3,56 @@
 package github
 
 #RepositoryTests: {
+	"omits-allowed-actions-when-disabled": {
+		input: #Repository & {in: {
+			name:          "oakmont"
+			visibility:    "private"
+			defaultBranch: "main"
+			features: {}
+			merge: {}
+			actions: {
+				enabled: false
+				allowed: "selected"
+				selected: patterns: ["actions/checkout@*"]
+			}
+		}}
+
+		let permissions = input.out.resource.github_actions_repository_permissions.oakmont
+
+		assert: permissions.enabled == false
+		assert: permissions.allowed_actions == _|_
+		assert: permissions.allowed_actions_config == _|_
+	}
+
+	"renders-selected-actions-when-enabled": {
+		input: #Repository & {in: {
+			name:          "oakmont"
+			visibility:    "private"
+			defaultBranch: "main"
+			features: {}
+			merge: {}
+			actions: {
+				enabled: true
+				allowed: "selected"
+				selected: {
+					githubOwned: false
+					verified:    true
+					patterns: ["actions/checkout@*"]
+				}
+			}
+		}}
+
+		let permissions = input.out.resource.github_actions_repository_permissions.oakmont
+
+		assert: permissions.enabled == true
+		assert: permissions.allowed_actions == "selected"
+		assert: permissions.allowed_actions_config == {
+			github_owned_allowed: false
+			verified_allowed:     true
+			patterns_allowed: ["actions/checkout@*"]
+		}
+	}
+
 	"renders-ruleset-with-user-bypass": {
 		input: #Repository & {in: {
 			name:          "oakmont"

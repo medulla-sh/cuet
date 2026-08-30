@@ -229,14 +229,17 @@ import (
 
 				"repository":         "${\(ref).name}"
 				enabled:              in.actions.enabled
-				allowed_actions:      in.actions.allowed
 				sha_pinning_required: in.actions.requireShaPinning
 
-				if in.actions.allowed == "selected" {
-					allowed_actions_config: {
-						github_owned_allowed: in.actions.selected.githubOwned
-						verified_allowed:     in.actions.selected.verified
-						patterns_allowed:     in.actions.selected.patterns
+				if in.actions.enabled {
+					allowed_actions: in.actions.allowed
+
+					if in.actions.allowed == "selected" {
+						allowed_actions_config: {
+							github_owned_allowed: in.actions.selected.githubOwned
+							verified_allowed:     in.actions.selected.verified
+							patterns_allowed:     in.actions.selected.patterns
+						}
 					}
 				}
 			}
