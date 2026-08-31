@@ -2,6 +2,51 @@
 
 package google
 
+#OrgIamTests: {
+	"custom-role-defaults": {
+		input: #OrgIamCustomRole & {in: {
+			name:        "VantaScanner"
+			description: "Reads organization resources"
+			permissions: ["resourcemanager.projects.list"]
+		}}
+		input: out: #envName: "global"
+
+		assert: input.ref == "google_organization_iam_custom_role.VantaScanner"
+		assert: input.out.data.google_project.global == {}
+		assert: input.out.resource.google_organization_iam_custom_role.VantaScanner == {
+			org_id:      "${data.google_project.global.org_id}"
+			role_id:     "VantaScanner"
+			title:       "VantaScanner"
+			description: "Reads organization resources"
+			permissions: ["resourcemanager.projects.list"]
+		}
+	}
+
+	"explicit-org": {
+		input: #OrgIamCustomRole & {in: {
+			name:  "Reader"
+			orgId: "123456789"
+			permissions: ["resourcemanager.projects.get"]
+		}}
+
+		assert: input.out.resource.google_organization_iam_custom_role.Reader.org_id == "123456789"
+	}
+
+	"member-defaults": {
+		input: #OrgIamMember & {in: {
+			role:   "roles/viewer"
+			member: "user:test@example.com"
+		}}
+		input: out: #envName: "global"
+
+		assert: input.ref == "google_organization_iam_member.roles-viewer-user-test-example-com"
+		assert: input.out.data.google_project.global == {}
+		assert: input.out.resource.google_organization_iam_member[input.in.name].org_id == "${data.google_project.global.org_id}"
+	}
+}
+
+orgIamResult: [for _, test in #OrgIamTests {test.assert & true}]
+
 #IamMemberTests: {
 	"current-environment": {
 		input: #IamMember & {"in": {
