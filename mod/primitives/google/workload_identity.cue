@@ -91,7 +91,7 @@ import T "github.com/medulla-sh/cuet"
 	}
 }
 
-#OidcWorkloadIdentityProvider: {
+#WorkloadIdentityProvider: {
 	in: {
 		// Adopts an existing provider using a supported Google Cloud import identifier.
 		#import?: string
@@ -117,7 +117,7 @@ import T "github.com/medulla-sh/cuet"
 		// References the containing pool ID or a Terraform expression that resolves to it.
 		poolId: string & !=""
 
-		// Maps OIDC claims into Google Cloud subject and custom attributes.
+		// Maps external claims into Google Cloud subject and custom attributes.
 		attributeMapping: {
 			"google.subject": string & !=""
 			[string]:         string & !=""
@@ -126,11 +126,18 @@ import T "github.com/medulla-sh/cuet"
 		// Rejects tokens that do not satisfy the Common Expression Language predicate.
 		attributeCondition: string & !=""
 
-		// Identifies the OpenID Connect issuer.
-		issuerUri: =~"^https://.+"
+		{
+			oidc: {
+				// Identifies the OpenID Connect issuer.
+				issuerUri: =~"^https://.+"
 
-		// Restricts accepted token audiences when the issuer default is insufficient.
-		allowedAudiences: [...string]
+				// Restricts accepted token audiences when the issuer default is insufficient.
+				allowedAudiences: [...string]
+			}
+		} | {
+			// Identifies the trusted AWS account.
+			aws: accountId: =~"^[0-9]{12}$"
+		}
 
 		// Prevents new token exchanges while preserving the provider configuration.
 		disabled: bool
@@ -168,11 +175,17 @@ import T "github.com/medulla-sh/cuet"
 				description: in.description
 			}
 
-			oidc: {
-				issuer_uri: in.issuerUri
-				if len(in.allowedAudiences) > 0 {
-					allowed_audiences: in.allowedAudiences
+			if in.oidc != _|_ {
+				oidc: {
+					issuer_uri: in.oidc.issuerUri
+					if len(in.oidc.allowedAudiences) > 0 {
+						allowed_audiences: in.oidc.allowedAudiences
+					}
 				}
+			}
+
+			if in.aws != _|_ {
+				aws: account_id: in.aws.accountId
 			}
 		}
 	}
