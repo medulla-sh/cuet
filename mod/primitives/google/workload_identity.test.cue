@@ -3,6 +3,15 @@
 package google
 
 #WorkloadIdentityTests: {
+	"subject-principal": {
+		input: #WorkloadIdentityPrincipal & {in: {
+			poolName: "projects/123/locations/global/workloadIdentityPools/vanta"
+			subject:  "vanta-scanner"
+		}}
+
+		assert: input.val == "principal://iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/vanta/subject/vanta-scanner"
+	}
+
 	"aws-provider": {
 		input: #WorkloadIdentityProvider & {in: {
 			name: "vanta-aws"

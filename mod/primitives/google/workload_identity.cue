@@ -4,6 +4,16 @@ import T "github.com/medulla-sh/cuet"
 
 #DeletionPolicy: "ABANDON" | "DELETE" | "PREVENT"
 
+#WorkloadIdentityPrincipal: {
+	in: {
+		// Full workload identity pool resource name, including project and location.
+		poolName: string & !=""
+		subject:  string & !=""
+	}
+
+	val: "principal://iam.googleapis.com/\(in.poolName)/subject/\(in.subject)"
+}
+
 #WorkloadIdentityPrincipalSet: {
 	in: {
 		// Full workload identity pool resource name, including project and location.

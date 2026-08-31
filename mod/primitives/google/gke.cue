@@ -189,8 +189,12 @@ import (
 			if in.project.id != _|_ {in.project.id},
 			"${data.google_project.\(projectDataName).project_id}",
 		][0]
+		let principal = #WorkloadIdentityPrincipal & {"in": {
+			poolName: "projects/${data.google_project.\(projectDataName).number}/locations/global/workloadIdentityPools/\(projectId).svc.id.goog"
+			subject:  "ns/\(in.namespace)/sa/\(in.serviceAccount)"
+		}}
 
-		#val: "principal://iam.googleapis.com/projects/${data.google_project.\(projectDataName).number}/locations/global/workloadIdentityPools/\(projectId).svc.id.goog/subject/ns/\(in.namespace)/sa/\(in.serviceAccount)"
+		#val: principal.val
 
 		data: google_project: (projectDataName): {
 			if in.project.id != _|_ {
