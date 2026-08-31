@@ -7,13 +7,19 @@ import (
 
 #GcpServices:
 	"artifactregistry.googleapis.com" |
+	"bigquery.googleapis.com" |
+	"cloudasset.googleapis.com" |
+	"cloudkms.googleapis.com" |
 	"cloudresourcemanager.googleapis.com" |
 	"cloudidentity.googleapis.com" |
 	"cloudtrace.googleapis.com" |
 	"compute.googleapis.com" |
 	"connectgateway.googleapis.com" |
+	"containeranalysis.googleapis.com" |
 	"container.googleapis.com" |
 	"dns.googleapis.com" |
+	"essentialcontacts.googleapis.com" |
+	"firestore.googleapis.com" |
 	"gkeconnect.googleapis.com" |
 	"gkehub.googleapis.com" |
 	"iam.googleapis.com" |
@@ -27,9 +33,11 @@ import (
 	"pubsub.googleapis.com" |
 	"run.googleapis.com" |
 	"secretmanager.googleapis.com" |
+	"serviceusage.googleapis.com" |
 	"servicenetworking.googleapis.com" |
 	"sqladmin.googleapis.com" |
 	"sts.googleapis.com" |
+	"storage-api.googleapis.com" |
 	"telemetry.googleapis.com" |
 	"trafficdirector.googleapis.com"
 
@@ -46,8 +54,14 @@ import (
 		billingAccount?: string
 		{orgId: string} | {folderId: string} | *{}
 
+		deletionPolicy: #DeletionPolicy
+		deletionPolicy: _ | *"PREVENT"
+
 		enabledServices: [...#GcpServices]
 		enabledServices: [_, ...]
+
+		disableServicesOnDestroy: bool
+		disableServicesOnDestroy: _ | *true
 	}
 	ref: "google_project.\(in.name)"
 	out: T.#TerraformInput & {
@@ -56,8 +70,9 @@ import (
 				#import: in.#import
 			}
 
-			name:       in.projectName
-			project_id: in.projectId
+			name:            in.projectName
+			project_id:      in.projectId
+			deletion_policy: in.deletionPolicy
 
 			if in.billingAccount != _|_ {
 				billing_account: in.billingAccount
@@ -76,8 +91,9 @@ import (
 		for service in in.enabledServices {
 			let serviceName = "\(in.name)-\(strings.Replace(service, ".", "-", -1))"
 			resource: google_project_service: (serviceName): {
-				project:   "${\(ref).id}"
-				"service": service
+				project:            "${\(ref).id}"
+				"service":          service
+				disable_on_destroy: in.disableServicesOnDestroy
 			}
 		}
 	}

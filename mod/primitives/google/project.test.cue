@@ -5,8 +5,10 @@ package google
 #ProjectTests: {
 	"enabled-services": {
 		input: #Project & {in: {
-			name:  "internal"
-			orgId: "123456789"
+			name:                     "internal"
+			orgId:                    "123456789"
+			deletionPolicy:           "ABANDON"
+			disableServicesOnDestroy: false
 			enabledServices: [
 				"cloudresourcemanager.googleapis.com",
 				"connectgateway.googleapis.com",
@@ -14,7 +16,9 @@ package google
 			]
 		}}
 
+		assert: input.out.resource.google_project.internal.deletion_policy == "ABANDON"
 		assert: input.out.resource.google_project_service["internal-connectgateway-googleapis-com"].service == "connectgateway.googleapis.com"
+		assert: input.out.resource.google_project_service["internal-connectgateway-googleapis-com"].disable_on_destroy == false
 	}
 
 	"service-identity": {
