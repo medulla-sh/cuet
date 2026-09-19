@@ -68,6 +68,46 @@ infra: in: {
 }
 ```
 
+## Explicit resource dependencies
+
+Use `#dependsOn` when a prerequisite is not captured by an attribute reference,
+such as enabling an API before creating resources through it. The framework
+accepts this metadata on resource, data, and ephemeral blocks and renders it as
+Terraform `depends_on`. Supporting primitives expose it through their `in`
+fields:
+
+```cue
+let scannerAccount = google.#ServiceAccount & {in: {
+    #dependsOn: [scannerProject.refs.services["iam.googleapis.com"]]
+    accountId: "audit-scanner"
+    project: {
+        name: scannerProject.in.name
+        id: "${\(scannerProject.refs.project).project_id}"
+    }
+}}
+scannerAccount.out
+```
+
+`google.#Project.refs.project` names the project resource; `ref` remains a
+deprecated compatibility alias. Its
+`refs.services[apiName]` entries name the API-enablement resources for its
+`enabledServices`. Depending on the project alone does not wait for API
+enablement.
+
+Dependencies are resource or data-source addresses in the same Terraform
+configuration, without `${...}` interpolation. When `#dependsOn` is present,
+the renderer combines it with any existing `depends_on`, removes duplicates,
+and sorts the addresses. Empty metadata emits no dependency attribute unless
+the block already explicitly declares one. Raw `depends_on` is preserved
+unchanged when metadata is absent.
+
+Primitive authors forward dependencies to the resource that requires them;
+they do not automatically apply them to every generated resource or project
+lookup. Normal attribute references continue to establish implicit dependencies.
+Terraform/OpenTofu validates dependency targets and cycles. This mechanism does
+not schedule separate modules or environments, and API propagation retries
+remain the provider's responsibility.
+
 ## Notes
 
 - Other frameworks may compose their backend output beside `terraform` in the

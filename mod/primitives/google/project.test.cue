@@ -19,6 +19,8 @@ package google
 		assert: input.out.resource.google_project.internal.deletion_policy == "ABANDON"
 		assert: input.out.resource.google_project_service["internal-connectgateway-googleapis-com"].service == "connectgateway.googleapis.com"
 		assert: input.out.resource.google_project_service["internal-connectgateway-googleapis-com"].disable_on_destroy == false
+		assert: input.refs.services["connectgateway.googleapis.com"] == "google_project_service.internal-connectgateway-googleapis-com"
+		assert: len(input.refs.services) == len(input.in.enabledServices)
 	}
 
 	"service-identity": {

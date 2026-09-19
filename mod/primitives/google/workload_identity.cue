@@ -44,6 +44,8 @@ import T "github.com/medulla-sh/cuet"
 
 #WorkloadIdentityPool: {
 	in: {
+		#dependsOn?: [...string]
+
 		// Adopts an existing pool using a supported Google Cloud import identifier.
 		#import?: string
 
@@ -84,6 +86,9 @@ import T "github.com/medulla-sh/cuet"
 		}
 
 		resource: google_iam_workload_identity_pool: (in.name): {
+			if in.#dependsOn != _|_ {
+				#dependsOn: in.#dependsOn
+			}
 			if in.#import != _|_ {
 				#import: in.#import
 			}
@@ -103,6 +108,8 @@ import T "github.com/medulla-sh/cuet"
 
 #WorkloadIdentityProvider: {
 	in: {
+		#dependsOn?: [...string]
+
 		// Adopts an existing provider using a supported Google Cloud import identifier.
 		#import?: string
 
@@ -168,6 +175,9 @@ import T "github.com/medulla-sh/cuet"
 		}
 
 		resource: google_iam_workload_identity_pool_provider: (in.name): {
+			if in.#dependsOn != _|_ {
+				#dependsOn: in.#dependsOn
+			}
 			if in.#import != _|_ {
 				#import: in.#import
 			}

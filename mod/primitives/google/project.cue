@@ -6,17 +6,31 @@ import (
 )
 
 #GcpServices:
+	"accesscontextmanager.googleapis.com" |
+	"alloydb.googleapis.com" |
+	"apigateway.googleapis.com" |
+	"apikeys.googleapis.com" |
 	"artifactregistry.googleapis.com" |
 	"bigquery.googleapis.com" |
+	"bigtableadmin.googleapis.com" |
+	"binaryauthorization.googleapis.com" |
+	"certificatemanager.googleapis.com" |
 	"cloudasset.googleapis.com" |
+	"cloudbilling.googleapis.com" |
+	"cloudbuild.googleapis.com" |
+	"cloudfunctions.googleapis.com" |
+	"cloudidentity.googleapis.com" |
 	"cloudkms.googleapis.com" |
 	"cloudresourcemanager.googleapis.com" |
-	"cloudidentity.googleapis.com" |
 	"cloudtrace.googleapis.com" |
+	"composer.googleapis.com" |
 	"compute.googleapis.com" |
 	"connectgateway.googleapis.com" |
-	"containeranalysis.googleapis.com" |
 	"container.googleapis.com" |
+	"containeranalysis.googleapis.com" |
+	"dataflow.googleapis.com" |
+	"dataproc.googleapis.com" |
+	"datastore.googleapis.com" |
 	"dns.googleapis.com" |
 	"essentialcontacts.googleapis.com" |
 	"firestore.googleapis.com" |
@@ -25,21 +39,29 @@ import (
 	"iam.googleapis.com" |
 	"iamcredentials.googleapis.com" |
 	"logging.googleapis.com" |
+	"memcache.googleapis.com" |
 	"meshca.googleapis.com" |
 	"meshconfig.googleapis.com" |
 	"monitoring.googleapis.com" |
 	"networksecurity.googleapis.com" |
 	"networkservices.googleapis.com" |
+	"orgpolicy.googleapis.com" |
+	"privateca.googleapis.com" |
 	"pubsub.googleapis.com" |
+	"redis.googleapis.com" |
 	"run.googleapis.com" |
 	"secretmanager.googleapis.com" |
-	"serviceusage.googleapis.com" |
+	"servicedirectory.googleapis.com" |
 	"servicenetworking.googleapis.com" |
+	"serviceusage.googleapis.com" |
+	"spanner.googleapis.com" |
 	"sqladmin.googleapis.com" |
-	"sts.googleapis.com" |
 	"storage-api.googleapis.com" |
+	"storage.googleapis.com" |
+	"sts.googleapis.com" |
 	"telemetry.googleapis.com" |
-	"trafficdirector.googleapis.com"
+	"trafficdirector.googleapis.com" |
+	"vpcaccess.googleapis.com"
 
 #Project: {
 	in: {
@@ -63,7 +85,16 @@ import (
 		disableServicesOnDestroy: bool
 		disableServicesOnDestroy: _ | *true
 	}
-	ref: "google_project.\(in.name)"
+	// Deprecated: use refs.project instead.
+	ref: refs.project
+	refs: {
+		project: "google_project.\(in.name)"
+		services: {
+			for service in in.enabledServices {
+				(service): "google_project_service.\(in.name)-\(strings.Replace(service, ".", "-", -1))"
+			}
+		}
+	}
 	out: T.#TerraformInput & {
 		resource: google_project: (in.name): {
 			if in.#import != _|_ {
@@ -91,7 +122,7 @@ import (
 		for service in in.enabledServices {
 			let serviceName = "\(in.name)-\(strings.Replace(service, ".", "-", -1))"
 			resource: google_project_service: (serviceName): {
-				project:            "${\(ref).id}"
+				project:            "${\(refs.project).id}"
 				"service":          service
 				disable_on_destroy: in.disableServicesOnDestroy
 			}

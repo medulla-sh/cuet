@@ -161,6 +161,7 @@ import (
 #ServiceAccountIamMember: {
 	in: {
 		#import?: string
+		#dependsOn?: [...string]
 
 		name: string
 
@@ -173,6 +174,9 @@ import (
 
 	out: T.#TerraformInput & {
 		resource: google_service_account_iam_member: (in.name): {
+			if in.#dependsOn != _|_ {
+				#dependsOn: in.#dependsOn
+			}
 			if in.#import != _|_ {
 				#import: in.#import
 			}

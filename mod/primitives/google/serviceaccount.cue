@@ -5,6 +5,7 @@ import T "github.com/medulla-sh/cuet"
 #ServiceAccount: {
 	in: {
 		#import?: string
+		#dependsOn?: [...string]
 
 		accountId: string
 
@@ -40,6 +41,9 @@ import T "github.com/medulla-sh/cuet"
 		}
 
 		resource: google_service_account: (in.name): {
+			if in.#dependsOn != _|_ {
+				#dependsOn: in.#dependsOn
+			}
 			if in.#import != _|_ {
 				#import: in.#import
 			}
