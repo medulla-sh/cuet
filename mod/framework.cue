@@ -299,7 +299,24 @@ _#RenderTerraformInput: {
 						if block.#provider != _|_ {block.#provider},
 						strings.SplitN(sourceName, "_", 2)[0],
 					][0]
-					(sourceName): (blockName): block & {
+					(sourceName): (blockName): {
+						if block.#dependsOn == _|_ {
+							block
+						}
+						if block.#dependsOn != _|_ {
+							// Rebuild the block so existing Terraform dependencies can be
+							// combined rather than unified positionally as CUE lists.
+							for key, value in block if key != "depends_on" {
+								(key): value
+							}
+							let dependencies = {
+								for ref in block.#dependsOn {(ref): true}
+								for ref in (*block.depends_on | []) {(ref): true}
+							}
+							if len(dependencies) > 0 || block.depends_on != _|_ {
+								depends_on: list.Sort([for ref, _ in dependencies {ref}], list.Ascending)
+							}
+						}
 						if block.#provider != _|_ || block.#providerAlias != _|_ {
 							"provider": [
 								if block.#providerAlias != _|_ {"\(providerName).\(block.#providerAlias)"},

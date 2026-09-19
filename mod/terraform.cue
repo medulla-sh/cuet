@@ -38,11 +38,18 @@ package cuet
 
 	resource?: [string]: [string]: {
 		#history?: [...#TerraformResourceHistoryEntry]
+		#dependsOn?: [...string]
 		...
 	}
 
-	data?: [string]: [string]:      _
-	ephemeral?: [string]: [string]: _
+	data?: [string]: [string]: {
+		#dependsOn?: [...string]
+		...
+	}
+	ephemeral?: [string]: [string]: {
+		#dependsOn?: [...string]
+		...
+	}
 
 	variable?: [string]: {
 		type?:        string
