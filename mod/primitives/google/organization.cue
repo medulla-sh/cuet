@@ -4,7 +4,7 @@ package google
 	in: {
 		#providerAlias?: string
 		name:            string
-		{domain: string} | {orgId: int} | *{}
+		{domain: string} | {orgId: string} | *{}
 	}
 	ref: "data.google_organization.\(in.name)"
 	out: {
