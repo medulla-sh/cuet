@@ -91,14 +91,17 @@ import (
 		name: string
 		name: _ | *secretId
 
-		project:  string
-		secretId: string
-		version:  string
-		version:  _ | *"latest"
+		project:   string
+		secretId:  string
+		version:   string
+		version:   _ | *"latest"
+		ephemeral: bool
+		ephemeral: _ | *true
 	}
-	ref: "ephemeral.google_secret_manager_secret_version.\(in.name)"
+	let kind = [if in.ephemeral {"ephemeral"}, if !in.ephemeral {"data"}][0]
+	ref: "\(kind).google_secret_manager_secret_version.\(in.name)"
 	out: T.#TerraformInput & {
-		ephemeral: "google_secret_manager_secret_version": (in.name): {
+		(kind): "google_secret_manager_secret_version": (in.name): {
 			project: in.project
 			secret:  in.secretId
 			version: in.version

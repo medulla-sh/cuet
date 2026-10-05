@@ -34,3 +34,35 @@ package google
 }
 
 secretResult: [for _, test in #SecretTests {test.assert & true}]
+
+#SecretVersionTests: {
+	let base = {project: "example-project", secretId: "example-secret"}
+	"ephemeral-by-default": {
+		input: #SecretVersion & {in: base}
+
+		assert: input.ref == "ephemeral.google_secret_manager_secret_version.example-secret"
+		assert: input.out.ephemeral.google_secret_manager_secret_version[base.secretId] == {
+			project: base.project
+			secret:  base.secretId
+			version: "latest"
+		}
+		assert: input.out.data == _|_
+	}
+	"persisted-read-with-explicit-name-and-version": {
+		input: #SecretVersion & {in: base & {
+			name:      "replicated"
+			version:   "3"
+			ephemeral: false
+		}}
+
+		assert: input.ref == "data.google_secret_manager_secret_version.replicated"
+		assert: input.out.data.google_secret_manager_secret_version.replicated == {
+			project: base.project
+			secret:  base.secretId
+			version: "3"
+		}
+		assert: input.out.ephemeral == _|_
+	}
+}
+
+secretVersionResult: [for _, test in #SecretVersionTests {test.assert & true}]
