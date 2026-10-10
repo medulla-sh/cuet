@@ -33,6 +33,9 @@ impl CheckProgress {
                 bar
             })
             .collect();
+        // All rows are now present and remain in place when checks finish.
+        // Overwrite them without clearing first to reduce terminal flicker.
+        progress.set_move_cursor(true);
         let statuses = vec![None; labels.len()];
 
         Self {
