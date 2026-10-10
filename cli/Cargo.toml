@@ -1,6 +1,6 @@
 [package]
 name = "cuet"
-version = "0.10.1"
+version = "0.10.2"
 edition = "2024"
 description = "A CLI for managing infrastructure deployment using the cuet framework."
 license = "MIT"
