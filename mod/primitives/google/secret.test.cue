@@ -36,6 +36,27 @@ package google
 secretResult: [for _, test in #SecretTests {test.assert & true}]
 
 #SecretVersionTests: {
+	for ephemeral in [true, false] {
+		for name, secretId in {
+			short:     "example-secret"
+			qualified: "projects/123456789/secrets/example-secret"
+		} {
+			"project-omitted-\(name)-\(ephemeral)": {
+				input: #SecretVersion & {in: {
+					name:        "example"
+					"secretId":  secretId
+					"ephemeral": ephemeral
+				}}
+				let kind = [if ephemeral {"ephemeral"}, if !ephemeral {"data"}][0]
+				let version = input.out[kind].google_secret_manager_secret_version.example
+
+				assert: version.project == _|_
+				assert: version.secret == secretId
+				assert: version.version == "latest"
+				assert: input.ref == "\(kind).google_secret_manager_secret_version.example"
+			}
+		}
+	}
 	let base = {project: "example-project", secretId: "example-secret"}
 	"ephemeral-by-default": {
 		input: #SecretVersion & {in: base}

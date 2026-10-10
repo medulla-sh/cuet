@@ -91,7 +91,7 @@ import (
 		name: string
 		name: _ | *secretId
 
-		project:   string
+		project?:  string
 		secretId:  string
 		version:   string
 		version:   _ | *"latest"
@@ -102,7 +102,9 @@ import (
 	ref: "\(kind).google_secret_manager_secret_version.\(in.name)"
 	out: T.#TerraformInput & {
 		(kind): "google_secret_manager_secret_version": (in.name): {
-			project: in.project
+			if in.project != _|_ {
+				project: in.project
+			}
 			secret:  in.secretId
 			version: in.version
 		}
