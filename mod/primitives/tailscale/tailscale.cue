@@ -88,6 +88,39 @@ import (
 	}
 }
 
+#Service: {
+	in: {
+		#import?: string
+
+		name: string
+		ports: [string, ...string]
+		tags: [...string]
+
+		description: string
+		description: _ | *""
+	}
+
+	ref: "tailscale_service.\(in.name)"
+
+	out: T.#TerraformInput & {
+		resource: tailscale_service: (in.name): {
+			if in.#import != _|_ {
+				#import: in.#import
+			}
+
+			name:  "svc:\(in.name)"
+			ports: in.ports
+
+			if len(in.tags) > 0 {
+				tags: in.tags
+			}
+			if in.description != "" {
+				comment: in.description
+			}
+		}
+	}
+}
+
 #TailnetSettings: {
 	in: {
 		#import?: string
