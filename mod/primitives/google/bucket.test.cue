@@ -3,6 +3,16 @@
 package google
 
 #BucketTests: {
+	for mode in ["inherited", "enforced"] {
+		"public access prevention \(mode)": {
+			bucket: #Bucket & {in: {
+				name:                   "private-documents"
+				location:               "us-west1"
+				publicAccessPrevention: mode
+			}}
+			assert: bucket.out.resource.google_storage_bucket["private-documents"].public_access_prevention == mode
+		}
+	}
 	"lifecycle rules and principals": {
 		bucket: #Bucket & {in: {
 			name:     "cache"

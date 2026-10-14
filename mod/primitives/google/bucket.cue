@@ -11,8 +11,9 @@ import (
 	in: {
 		#import?: string
 
-		name:     =~"^[a-z0-9-]{3,62}$"
-		location: #BucketLocation
+		name:                    =~"^[a-z0-9-]{3,62}$"
+		location:                #BucketLocation
+		publicAccessPrevention?: "inherited" | "enforced"
 
 		enableVersioning: bool
 		enableVersioning: _ | *false
@@ -55,6 +56,9 @@ import (
 
 			name:     in.name
 			location: in.location
+			if in.publicAccessPrevention != _|_ {
+				public_access_prevention: in.publicAccessPrevention
+			}
 
 			versioning: enabled: in.enableVersioning
 
