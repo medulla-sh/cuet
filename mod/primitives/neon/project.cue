@@ -12,8 +12,7 @@ import (
 
 		name: string
 
-		pgVersion: int
-		pgVersion: _ | *18
+		pgVersion?: int
 
 		historyRetentionSeconds: int & >=0
 		historyRetentionSeconds: _ | *0
@@ -28,6 +27,9 @@ import (
 				#import: in.#import
 			}
 			name: in.name
+			if in.pgVersion != _|_ {
+				pg_version: in.pgVersion
+			}
 
 			history_retention_seconds: in.historyRetentionSeconds
 			region_id:                 in.regionId
