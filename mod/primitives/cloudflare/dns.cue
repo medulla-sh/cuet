@@ -19,6 +19,7 @@ import (
 		#imports: {
 			zone?:           string
 			customFirewall?: string
+			minTlsVersion?:  string
 		}
 
 		name: string
@@ -29,6 +30,9 @@ import (
 
 		type: "full" | "partial"
 		type: _ | *"full"
+
+		minTlsVersion: "1.0" | "1.1" | "1.2" | "1.3"
+		minTlsVersion: _ | *"1.2"
 
 		customFirewallRules: [...#ZoneCustomFirewallRule]
 
@@ -43,7 +47,8 @@ import (
 	}
 
 	refs: {
-		zone: "cloudflare_zone.\(in.name)"
+		zone:          "cloudflare_zone.\(in.name)"
+		minTlsVersion: "cloudflare_zone_setting.\(in.name)-min-tls-version"
 		if len(in.customFirewallRules) > 0 {
 			customFirewall: "cloudflare_ruleset.\(in.name)-custom-firewall"
 		}
@@ -84,6 +89,15 @@ import (
 					enabled: rule.enabled
 				}]
 			}
+		}
+
+		resource: cloudflare_zone_setting: "\(in.name)-min-tls-version": {
+			if in.#imports.minTlsVersion != _|_ {
+				#import: in.#imports.minTlsVersion
+			}
+			zone_id:    "${\(refs.zone).id}"
+			setting_id: "min_tls_version"
+			value:      in.minTlsVersion
 		}
 	}
 }

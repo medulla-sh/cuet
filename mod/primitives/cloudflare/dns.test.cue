@@ -43,6 +43,24 @@ package cloudflare
 
 		assert: input.out.resource.cloudflare_ruleset == _|_
 		assert: input.refs.customFirewall == _|_
+		assert: input.out.resource.cloudflare_zone_setting["oakmont-health-min-tls-version"].value == "1.2"
+	}
+
+	"tls-version-override-and-import": {
+		input: #Zone & {in: {
+			name:          "example-com"
+			zone:          "example.com"
+			accountId:     "account-id"
+			minTlsVersion: "1.3"
+			#imports: minTlsVersion: "zone-id/min_tls_version"
+		}}
+
+		let setting = input.out.resource.cloudflare_zone_setting["example-com-min-tls-version"]
+		assert: setting.zone_id == "${cloudflare_zone.example-com.id}"
+		assert: setting.setting_id == "min_tls_version"
+		assert: setting.value == "1.3"
+		assert: setting.#import == "zone-id/min_tls_version"
+		assert: input.refs.minTlsVersion == "cloudflare_zone_setting.example-com-min-tls-version"
 	}
 
 	"duplicate-rule-ref-rejected": {
