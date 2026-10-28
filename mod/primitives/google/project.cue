@@ -38,6 +38,7 @@ import (
 	"gkehub.googleapis.com" |
 	"iam.googleapis.com" |
 	"iamcredentials.googleapis.com" |
+	"ids.googleapis.com" |
 	"logging.googleapis.com" |
 	"memcache.googleapis.com" |
 	"meshca.googleapis.com" |
