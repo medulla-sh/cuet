@@ -3,6 +3,16 @@
 package google
 
 #ProjectTests: {
+	for name, services in {omitted: {}, empty: {enabledServices: []}} {
+		"\(name)-services": {
+			input: #Project & {in: {name: "sso"} & services}
+
+			assert: input.out.resource.google_project.sso.project_id == "sso"
+			assert: [for resourceType, _ in input.out.resource {resourceType}] == ["google_project"]
+			assert: len(input.refs.services) == 0
+		}
+	}
+
 	"enabled-services": {
 		input: #Project & {in: {
 			name:                     "internal"

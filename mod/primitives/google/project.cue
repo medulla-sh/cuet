@@ -81,7 +81,6 @@ import (
 		deletionPolicy: _ | *"PREVENT"
 
 		enabledServices: [...#GcpServices]
-		enabledServices: [_, ...]
 
 		disableServicesOnDestroy: bool
 		disableServicesOnDestroy: _ | *true
