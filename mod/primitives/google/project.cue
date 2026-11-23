@@ -37,6 +37,7 @@ import (
 	"firestore.googleapis.com" |
 	"gkeconnect.googleapis.com" |
 	"gkehub.googleapis.com" |
+	"groupssettings.googleapis.com" |
 	"iam.googleapis.com" |
 	"iamcredentials.googleapis.com" |
 	"ids.googleapis.com" |
