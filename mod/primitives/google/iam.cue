@@ -90,6 +90,31 @@ import (
 	}
 }
 
+#FolderIamMember: {
+	in: {
+		#import?: string
+
+		name:   string & !=""
+		folder: string & !=""
+		role:   string & !=""
+		member: string & !=""
+	}
+
+	ref: "google_folder_iam_member.\(in.name)"
+
+	out: T.#TerraformInput & {
+		resource: google_folder_iam_member: (in.name): {
+			if in.#import != _|_ {
+				#import: in.#import
+			}
+
+			folder: in.folder
+			role:   in.role
+			member: in.member
+		}
+	}
+}
+
 #IamMember: {
 	in: {
 		#import?: string

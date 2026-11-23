@@ -59,6 +59,38 @@ package google
 
 orgIamResult: [for _, test in #OrgIamTests {test.assert & true}]
 
+#FolderIamMemberTests: {
+	"folder-reference": {
+		input: #FolderIamMember & {"in": {
+			name:   "dev-reader"
+			folder: "${google_folder.dev.name}"
+			role:   "roles/logging.viewer"
+			member: "group:operators@example.com"
+		}}
+
+		assert: input.ref == "google_folder_iam_member.dev-reader"
+		assert: input.out.resource.google_folder_iam_member["dev-reader"] == {
+			folder: "${google_folder.dev.name}"
+			role:   "roles/logging.viewer"
+			member: "group:operators@example.com"
+		}
+	}
+
+	"import": {
+		input: #FolderIamMember & {"in": {
+			#import: "folders/123 roles/logging.viewer group:operators@example.com"
+			name:    "dev-reader"
+			folder:  "folders/123"
+			role:    "roles/logging.viewer"
+			member:  "group:operators@example.com"
+		}}
+
+		assert: input.out.resource.google_folder_iam_member["dev-reader"].#import == input.in.#import
+	}
+}
+
+folderIamMemberResult: [for _, test in #FolderIamMemberTests {test.assert & true}]
+
 #IamMemberTests: {
 	"current-environment": {
 		input: #IamMember & {"in": {
