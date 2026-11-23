@@ -292,7 +292,7 @@ mod tests {
 
         let modules = discover_modules(&root)?;
 
-        assert!(modules.is_empty());
+        assert_eq!(modules, Vec::<String>::new());
         Ok(())
     }
 

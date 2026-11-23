@@ -105,7 +105,7 @@ exit 12
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"" as &[u8]);
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(!stderr.contains("terraform stdout sentinel"));
     assert!(!stderr.contains("terraform stderr sentinel"));

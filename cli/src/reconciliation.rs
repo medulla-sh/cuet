@@ -448,7 +448,7 @@ fi
                 },
             ]
         );
-        assert!(output_reconciliation.state_resources.is_empty());
+        assert_eq!(output_reconciliation.state_resources, []);
         assert!(absent.is_none());
         assert!(empty.is_none());
         assert!(malformed.is_err());

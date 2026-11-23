@@ -399,6 +399,6 @@ mod tests {
     fn test_target_values_ignore_discovery_errors_at_completion_boundary() {
         let values = super::target_candidates(OsStr::new(""));
 
-        assert!(values.is_empty());
+        assert_eq!(values, [] as [clap_complete::CompletionCandidate; 0]);
     }
 }

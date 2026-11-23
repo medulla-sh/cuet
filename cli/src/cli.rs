@@ -501,7 +501,7 @@ mod tests {
         else {
             panic!("expected migrate plan command");
         };
-        assert!(args.is_empty());
+        assert_eq!(args, Vec::<String>::new());
         assert_eq!(
             cli.target,
             Some(Target {
