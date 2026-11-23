@@ -7,6 +7,7 @@ import (
 
 #GcpServices:
 	"accesscontextmanager.googleapis.com" |
+	"admin.googleapis.com" |
 	"alloydb.googleapis.com" |
 	"apigateway.googleapis.com" |
 	"apikeys.googleapis.com" |
