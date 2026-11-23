@@ -83,6 +83,9 @@ import (
 
 		enabledServices: [...#GcpServices]
 
+		// Setting policies requires orgpolicy.googleapis.com in enabledServices.
+		policies: {[string]: _OrgPolicyConfig}
+
 		disableServicesOnDestroy: bool
 		disableServicesOnDestroy: _ | *true
 	}
@@ -127,6 +130,21 @@ import (
 				"service":          service
 				disable_on_destroy: in.disableServicesOnDestroy
 			}
+		}
+
+		for constraintId, policy in in.policies {
+			if refs.services["orgpolicy.googleapis.com"] == _|_ {
+				_|_("project policies require orgpolicy.googleapis.com in enabledServices")
+			}
+			(#OrgPolicy & {"in": {
+				policy
+				if policy.name == _|_ {
+					name: "\(in.name)-\(strings.Replace(constraintId, ".", "-", -1))"
+				}
+				constraint: constraintId
+				parent:     "projects/${\(refs.project).number}"
+				#dependsOn: [refs.services["orgpolicy.googleapis.com"]]
+			}}).out
 		}
 	}
 }
