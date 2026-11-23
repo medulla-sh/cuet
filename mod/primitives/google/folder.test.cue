@@ -2,6 +2,11 @@
 
 package google
 
+import (
+	"list"
+	"strings"
+)
+
 #FolderTests: {
 	"defaults": {
 		folder: #Folder & {in: {
@@ -59,3 +64,30 @@ package google
 }
 
 folderResult: [for _, test in #FolderTests {test.assert & true}]
+
+let hierarchy = #Folders & {in: {
+	parent: "folders/123"
+	tree: {
+		runtime: dev: _
+		platform: dev: {}
+		"runtime--dev": _
+		"Shared Services": tooling: dev: _
+	}
+}}
+let hierarchyResources = hierarchy.out.resource.google_folder
+
+folderHierarchyResult: [
+	len(hierarchy.refs) & 8,
+	len(hierarchyResources) & 8,
+	(hierarchy.refs["runtime/dev"] != hierarchy.refs["platform/dev"]) & true,
+	(hierarchy.refs["runtime/dev"] != hierarchy.refs["runtime--dev"]) & true,
+	for path, ref in hierarchy.refs {
+		let labels = strings.Split(path, "/")
+		let resource = hierarchyResources[strings.TrimPrefix(ref, "google_folder.")]
+		let parent = [
+			if len(labels) == 1 {"folders/123"},
+			if len(labels) > 1 {"${\(hierarchy.refs[strings.Join(list.Take(labels, len(labels)-1), "/")]).name}"},
+		][0]
+		(resource.parent == parent && resource.display_name == labels[len(labels)-1] && resource.deletion_protection) & true
+	},
+]
