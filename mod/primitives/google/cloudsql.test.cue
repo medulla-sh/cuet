@@ -3,6 +3,24 @@
 package google
 
 #CloudSqlTests: {
+	"database flags": {
+		input: #CloudSqlInstance & {in: {
+			name:   "audit"
+			region: "us-west1"
+			engine: {type: "postgres", version: 18}
+			tier: "db-f1-micro"
+			privateNetwork: id: "projects/example/global/networks/dev"
+			databaseFlags: {
+				log_connections: "on"
+				"pgaudit.log":   "read,write"
+			}
+		}}
+
+		assert: input.out.resource.google_sql_database_instance.audit.settings.database_flags == [
+			{name: "log_connections", value: "on"},
+			{name: "pgaudit.log", value: "read,write"},
+		]
+	}
 	"postgres-instance": {
 		input: #CloudSqlInstance & {in: {
 			#import: {

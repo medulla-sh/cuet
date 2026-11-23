@@ -77,6 +77,7 @@ import T "github.com/medulla-sh/cuet"
 		}
 
 		labels: {[string]: string}
+		databaseFlags: [string & !=""]: string
 
 		databases: [string & !=""]: {}
 		users: [string & !=""]: {
@@ -138,6 +139,15 @@ import T "github.com/medulla-sh/cuet"
 
 				if len(in.labels) > 0 {
 					user_labels: in.labels
+				}
+
+				if len(in.databaseFlags) > 0 {
+					database_flags: [
+						for flagName, flagValue in in.databaseFlags {
+							name:  flagName
+							value: flagValue
+						},
+					]
 				}
 
 				backup_configuration: {

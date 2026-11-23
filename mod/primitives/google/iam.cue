@@ -90,6 +90,44 @@ import (
 	}
 }
 
+// #OrgIamAuditConfig owns the audit settings for one service.
+#OrgIamAuditConfig: {
+	in: {
+		#import?: string
+
+		name:    string & !=""
+		orgId:   string & !=""
+		service: string & !=""
+
+		logs: {
+			ADMIN_READ?: [...string & !=""]
+			DATA_READ?: [...string & !=""]
+			DATA_WRITE?: [...string & !=""]
+		}
+	}
+
+	ref: "google_organization_iam_audit_config.\(in.name)"
+	out: T.#TerraformInput & {
+		resource: google_organization_iam_audit_config: (in.name): {
+			if in.#import != _|_ {
+				#import: in.#import
+			}
+
+			org_id:  in.orgId
+			service: in.service
+			audit_log_config: [_, ...]
+			audit_log_config: [
+				for logType, exemptions in in.logs {
+					log_type: logType
+					if len(exemptions) > 0 {
+						exempted_members: exemptions
+					}
+				},
+			]
+		}
+	}
+}
+
 #FolderIamMember: {
 	in: {
 		#import?: string
