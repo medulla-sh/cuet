@@ -30,11 +30,11 @@ import (
 	out: this=T.#TerraformInput & {
 		let orgId = [
 			if in.orgId != _|_ {in.orgId},
-			if in.orgId == _|_ {"${data.google_project.\(this.#envName).org_id}"},
+			if in.orgId == _|_ {"${data.google_project_ancestry.\(this.#envName).org_id}"},
 		][0]
 
 		if in.orgId == _|_ {
-			data: google_project: (this.#envName): {}
+			data: google_project_ancestry: (this.#envName): {}
 		}
 
 		resource: google_organization_iam_custom_role: (in.name): {
@@ -71,11 +71,11 @@ import (
 	out: this=T.#TerraformInput & {
 		let orgId = [
 			if in.orgId != _|_ {in.orgId},
-			if in.orgId == _|_ {"${data.google_project.\(this.#envName).org_id}"},
+			if in.orgId == _|_ {"${data.google_project_ancestry.\(this.#envName).org_id}"},
 		][0]
 
 		if in.orgId == _|_ {
-			data: google_project: (this.#envName): {}
+			data: google_project_ancestry: (this.#envName): {}
 		}
 
 		resource: google_organization_iam_member: (in.name): {

@@ -12,9 +12,9 @@ package google
 		input: out: #envName: "global"
 
 		assert: input.ref == "google_organization_iam_custom_role.VantaScanner"
-		assert: input.out.data.google_project.global == {}
+		assert: input.out.data == {google_project_ancestry: global: {}}
 		assert: input.out.resource.google_organization_iam_custom_role.VantaScanner == {
-			org_id:      "${data.google_project.global.org_id}"
+			org_id:      "${data.google_project_ancestry.global.org_id}"
 			role_id:     "VantaScanner"
 			title:       "VantaScanner"
 			description: "Reads organization resources"
@@ -30,6 +30,7 @@ package google
 		}}
 
 		assert: input.out.resource.google_organization_iam_custom_role.Reader.org_id == "123456789"
+		assert: input.out.data == _|_
 	}
 
 	"member-defaults": {
@@ -40,8 +41,19 @@ package google
 		input: out: #envName: "global"
 
 		assert: input.ref == "google_organization_iam_member.roles-viewer-user-test-example-com"
-		assert: input.out.data.google_project.global == {}
-		assert: input.out.resource.google_organization_iam_member[input.in.name].org_id == "${data.google_project.global.org_id}"
+		assert: input.out.data == {google_project_ancestry: global: {}}
+		assert: input.out.resource.google_organization_iam_member[input.in.name].org_id == "${data.google_project_ancestry.global.org_id}"
+	}
+
+	"member-explicit-org": {
+		input: #OrgIamMember & {in: {
+			orgId:  "123456789"
+			role:   "roles/viewer"
+			member: "user:test@example.com"
+		}}
+
+		assert: input.out.resource.google_organization_iam_member[input.in.name].org_id == "123456789"
+		assert: input.out.data == _|_
 	}
 }
 
