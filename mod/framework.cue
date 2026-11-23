@@ -642,7 +642,7 @@ _#GenerateMoves: {
 				"current": {
 					module: in.#module
 					env:    in.#envName
-					name:   name
+					"name": name
 				}
 				"history": block.#history
 			}
@@ -659,12 +659,12 @@ _#GenerateMoves: {
 			crossStateTransitions: list.Concat([resolved.crossStateTransitions, [
 				if len(block.#history) != 0
 				if resolved.last.module != in.#module || resolved.last.env != in.#envName {
-					resourceType: resourceType
-					from:         resolved.last
+					"resourceType": resourceType
+					from:           resolved.last
 					to: {
 						module: in.#module
 						env:    in.#envName
-						name:   name
+						"name": name
 					}
 				},
 			]])
